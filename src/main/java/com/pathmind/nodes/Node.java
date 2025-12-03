@@ -3206,14 +3206,15 @@ public class Node {
 
                 amount = Math.max(1, amount);
 
-                if (blockId == null || blockId.isEmpty()) {
-                    sendNodeErrorMessage(client, "Cannot mine: a block type is required.");
+                Identifier blockIdentifier = Identifier.tryParse(blockId);
+                if (blockIdentifier == null || !Registries.BLOCK.containsId(blockIdentifier)) {
+                    sendNodeErrorMessage(client, "Cannot mine: a valid block type is required.");
                     future.complete(null);
                     return;
                 }
 
                 mineProcess.mineByName(amount, blockId);
-                started = true;
+                started = mineProcess.isActive();
                 break;
 
             case COLLECT_MULTIPLE:
@@ -3225,7 +3226,10 @@ public class Node {
 
                 String[] targets = Arrays.stream(blockList.split(","))
                         .map(String::trim)
-                        .filter(s -> !s.isEmpty())
+                        .filter(s -> {
+                            Identifier parsed = Identifier.tryParse(s);
+                            return parsed != null && Registries.BLOCK.containsId(parsed);
+                        })
                         .toArray(String[]::new);
 
                 if (targets.length == 0) {
@@ -3235,7 +3239,7 @@ public class Node {
                 }
 
                 mineProcess.mineByName(targets);
-                started = true;
+                started = mineProcess.isActive();
                 break;
 
             default:
@@ -3247,6 +3251,11 @@ public class Node {
             sendNodeErrorMessage(client, "Failed to start mining task for Mine node.");
             future.complete(null);
             return;
+        }
+
+        // Cancel any in-progress mining to avoid overlapping tasks that can deadlock the process
+        if (mineProcess.isActive()) {
+            mineProcess.cancel();
         }
 
         PreciseCompletionTracker.getInstance().startTrackingTask(PreciseCompletionTracker.TASK_COLLECT, future);
