@@ -3198,13 +3198,21 @@ public class Node {
                     blockId = blockParam.getStringValue();
                 }
 
+                int amount = 1;
+                NodeParameter amountParam = getParameter("Amount");
+                if (amountParam != null) {
+                    amount = amountParam.getIntValue();
+                }
+
+                amount = Math.max(1, amount);
+
                 if (blockId == null || blockId.isEmpty()) {
                     sendNodeErrorMessage(client, "Cannot mine: a block type is required.");
                     future.complete(null);
                     return;
                 }
 
-                mineProcess.mineByName(blockId);
+                mineProcess.mineByName(amount, blockId);
                 started = true;
                 break;
 
