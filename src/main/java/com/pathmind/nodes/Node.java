@@ -1526,6 +1526,7 @@ public class Node {
                 break;
             case HOTBAR:
                 parameters.add(new NodeParameter("Slot", ParameterType.INTEGER, "0"));
+                parameters.add(new NodeParameter("Item", ParameterType.STRING, ""));
                 break;
             case DROP_ITEM:
                 parameters.add(new NodeParameter("All", ParameterType.BOOLEAN, "false"));
@@ -5034,8 +5035,31 @@ public class Node {
             future.completeExceptionally(new RuntimeException("Minecraft client not available"));
             return;
         }
-        
-        int slot = MathHelper.clamp(getIntParameter("Slot", 0), 0, 8);
+
+        PlayerInventory inventory = client.player.getInventory();
+        String itemId = getStringParameter("Item", "").trim();
+        int slot;
+
+        if (!itemId.isEmpty()) {
+            Identifier identifier = Identifier.tryParse(itemId);
+            if (identifier == null || !Registries.ITEM.containsId(identifier)) {
+                sendNodeErrorMessage(client, "Hotbar slot item \"" + itemId + "\" is not a valid item ID.");
+                future.complete(null);
+                return;
+            }
+
+            Item targetItem = Registries.ITEM.get(identifier);
+            int foundSlot = findHotbarSlotWithItem(inventory, targetItem);
+            if (foundSlot == -1) {
+                sendNodeErrorMessage(client, "Item \"" + itemId + "\" is not in your hotbar.");
+                future.complete(null);
+                return;
+            }
+            slot = foundSlot;
+        } else {
+            slot = MathHelper.clamp(getIntParameter("Slot", 0), 0, 8);
+        }
+
         client.player.getInventory().setSelectedSlot(slot);
         client.player.networkHandler.sendPacket(new UpdateSelectedSlotC2SPacket(slot));
         future.complete(null);
