@@ -6,7 +6,6 @@ import com.pathmind.nodes.Node;
 import com.pathmind.nodes.NodeConnection;
 import com.pathmind.nodes.NodeParameter;
 import com.pathmind.nodes.NodeType;
-import com.pathmind.nodes.ParameterType;
 
 import java.io.Reader;
 import java.io.Writer;
@@ -120,18 +119,26 @@ public class NodeGraphPersistence {
                 System.err.println("Failed to set node ID: " + e.getMessage());
             }
 
+            // Save parameter values before setting mode (which will reinitialize parameters)
+            Map<String, String> savedParamValues = new HashMap<>();
+            if (nodeData.getParameters() != null) {
+                for (NodeGraphData.ParameterData paramData : nodeData.getParameters()) {
+                    savedParamValues.put(paramData.getName(), paramData.getValue());
+                }
+            }
+
             // Set the mode if it exists (this will reinitialize parameters)
             if (nodeData.getMode() != null) {
                 node.setMode(nodeData.getMode());
             }
 
-            // Restore parameters (overwrite the default parameters with saved ones)
-            node.getParameters().clear();
-            if (nodeData.getParameters() != null) {
-                for (NodeGraphData.ParameterData paramData : nodeData.getParameters()) {
-                    ParameterType paramType = ParameterType.valueOf(paramData.getType());
-                    NodeParameter param = new NodeParameter(paramData.getName(), paramType, paramData.getValue());
-                    node.getParameters().add(param);
+            // Restore saved parameter values (overwrite the default parameters with saved ones)
+            if (!savedParamValues.isEmpty()) {
+                for (NodeParameter param : node.getParameters()) {
+                    String savedValue = savedParamValues.get(param.getName());
+                    if (savedValue != null) {
+                        param.setStringValue(savedValue);
+                    }
                 }
             }
             node.recalculateDimensions();

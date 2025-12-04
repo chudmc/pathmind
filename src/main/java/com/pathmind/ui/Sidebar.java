@@ -31,6 +31,7 @@ public class Sidebar {
     private static final int NODE_HEIGHT = 18;
     private static final int PADDING = 4;
     private static final int CATEGORY_HEADER_HEIGHT = 20;
+    private static final int GROUP_HEADER_HEIGHT = 16;
     
     // Colors
     private static final int DARK_GREY_ALT = 0xFF2A2A2A;
@@ -40,6 +41,7 @@ public class Sidebar {
     private static final int HOVER_COLOR = 0xFF404040;
     
     private final Map<NodeCategory, List<NodeType>> categoryNodes;
+    private final Map<NodeCategory, List<NodeGroup>> groupedCategoryNodes;
     private final Map<NodeCategory, Boolean> categoryExpanded;
     private NodeType hoveredNodeType = null;
     private NodeCategory hoveredCategory = null;
@@ -52,6 +54,7 @@ public class Sidebar {
     public Sidebar() {
         this.categoryExpanded = new HashMap<>();
         this.categoryNodes = new HashMap<>();
+        this.groupedCategoryNodes = new HashMap<>();
         
         // Initialize categories as expanded by default
         for (NodeCategory category : NodeCategory.values()) {
@@ -66,18 +69,123 @@ public class Sidebar {
     private void initializeCategoryNodes() {
         for (NodeCategory category : NodeCategory.values()) {
             List<NodeType> nodes = new ArrayList<>();
-            
-            for (NodeType nodeType : NodeType.values()) {
-                if (nodeType == NodeType.PARAM_PLACE_TARGET) {
-                    continue;
+
+            if (category == NodeCategory.PARAMETERS) {
+                List<NodeGroup> parameterGroups = createParameterGroups();
+                groupedCategoryNodes.put(category, parameterGroups);
+                for (NodeGroup group : parameterGroups) {
+                    nodes.addAll(group.getNodes());
                 }
-                if (nodeType.getCategory() == category && nodeType.isDraggableFromSidebar()) {
-                    nodes.add(nodeType);
+            } else if (category == NodeCategory.SENSORS) {
+                List<NodeGroup> sensorGroups = createSensorGroups();
+                groupedCategoryNodes.put(category, sensorGroups);
+                for (NodeGroup group : sensorGroups) {
+                    nodes.addAll(group.getNodes());
+                }
+            } else {
+                for (NodeType nodeType : NodeType.values()) {
+                    if (nodeType == NodeType.PARAM_PLACE_TARGET) {
+                        continue;
+                    }
+                    if (nodeType.getCategory() == category && nodeType.isDraggableFromSidebar()) {
+                        nodes.add(nodeType);
+                    }
                 }
             }
-            
+
             categoryNodes.put(category, nodes);
         }
+    }
+
+    private List<NodeGroup> createParameterGroups() {
+        List<NodeGroup> groups = new ArrayList<>();
+        groups.add(new NodeGroup(
+            "Spatial Data",
+            NodeType.PARAM_COORDINATE,
+            NodeType.PARAM_ROTATION,
+            NodeType.PARAM_RANGE,
+            NodeType.PARAM_CLOSEST
+        ));
+        groups.add(new NodeGroup(
+            "Targets & Objects",
+            NodeType.PARAM_BLOCK,
+            NodeType.PARAM_BLOCK_LIST,
+            NodeType.PARAM_ITEM,
+            NodeType.PARAM_ENTITY,
+            NodeType.PARAM_PLAYER,
+            NodeType.PARAM_WAYPOINT,
+            NodeType.PARAM_SCHEMATIC
+        ));
+        groups.add(new NodeGroup(
+            "Inventory & Equipment",
+            NodeType.PARAM_INVENTORY_SLOT,
+            NodeType.PARAM_HAND
+        ));
+        groups.add(new NodeGroup(
+            "Utility Data",
+            NodeType.PARAM_DURATION,
+            NodeType.PARAM_BOOLEAN,
+            NodeType.PARAM_MESSAGE
+        ));
+        return groups;
+    }
+
+    private List<NodeGroup> createSensorGroups() {
+        List<NodeGroup> groups = new ArrayList<>();
+        groups.add(new NodeGroup(
+            "Player State",
+            NodeType.SENSOR_IS_SWIMMING,
+            NodeType.SENSOR_IS_IN_LAVA,
+            NodeType.SENSOR_IS_UNDERWATER,
+            NodeType.SENSOR_IS_FALLING
+        ));
+        groups.add(new NodeGroup(
+            "Position & Blocks",
+            NodeType.SENSOR_AT_COORDINATES,
+            NodeType.SENSOR_TOUCHING_BLOCK,
+            NodeType.SENSOR_BLOCK_AHEAD,
+            NodeType.SENSOR_BLOCK_BELOW
+        ));
+        groups.add(new NodeGroup(
+            "Entities & Visibility",
+            NodeType.SENSOR_TOUCHING_ENTITY,
+            NodeType.SENSOR_ENTITY_NEARBY,
+            NodeType.SENSOR_IS_RENDERED
+        ));
+        groups.add(new NodeGroup(
+            "Inventory & Items",
+            NodeType.SENSOR_ITEM_IN_INVENTORY
+        ));
+        groups.add(new NodeGroup(
+            "Player Stats",
+            NodeType.SENSOR_HEALTH_BELOW,
+            NodeType.SENSOR_HUNGER_BELOW
+        ));
+        groups.add(new NodeGroup(
+            "Environment & Weather",
+            NodeType.SENSOR_IS_DAYTIME,
+            NodeType.SENSOR_IS_RAINING,
+            NodeType.SENSOR_LIGHT_LEVEL_BELOW
+        ));
+        return groups;
+    }
+
+    private boolean hasGroupedContent(NodeCategory category) {
+        List<NodeGroup> groups = groupedCategoryNodes.get(category);
+        if (groups == null) {
+            return false;
+        }
+        for (NodeGroup group : groups) {
+            if (!group.isEmpty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private List<NodeGroup> getGroupsForCategory(NodeCategory category) {
+        List<NodeGroup> groups = groupedCategoryNodes.get(category);
+        return groups != null ? groups : java.util.Collections.emptyList();
     }
     
     private void calculateMaxScroll(int sidebarHeight) {
@@ -87,10 +195,20 @@ public class Sidebar {
         if (selectedCategory != null) {
             totalHeight += CATEGORY_HEADER_HEIGHT;
             
-            // Add space for nodes in selected category
-            List<NodeType> nodes = categoryNodes.get(selectedCategory);
-            if (nodes != null) {
-                totalHeight += nodes.size() * NODE_HEIGHT;
+            if (hasGroupedContent(selectedCategory)) {
+                for (NodeGroup group : getGroupsForCategory(selectedCategory)) {
+                    if (group.isEmpty()) {
+                        continue;
+                    }
+                    totalHeight += GROUP_HEADER_HEIGHT;
+                    totalHeight += group.getNodes().size() * NODE_HEIGHT;
+                }
+            } else {
+                // Add space for nodes in selected category
+                List<NodeType> nodes = categoryNodes.get(selectedCategory);
+                if (nodes != null) {
+                    totalHeight += nodes.size() * NODE_HEIGHT;
+                }
             }
         }
         
@@ -201,6 +319,7 @@ public class Sidebar {
         if (selectedCategory != null) {
             // Start content area at the very top of the sidebar, right after the title bar
             int contentY = sidebarStartY + PADDING - scrollOffset;
+            int sidebarBottom = sidebarStartY + sidebarHeight;
             
             // Category header
             context.drawTextWithShadow(
@@ -213,37 +332,90 @@ public class Sidebar {
             
             contentY += CATEGORY_HEADER_HEIGHT;
             
-            // Render nodes in selected category
-            List<NodeType> nodes = categoryNodes.get(selectedCategory);
-            if (nodes != null) {
-                for (NodeType nodeType : nodes) {
-                    if (contentY >= sidebarStartY + sidebarHeight) break; // Don't render beyond sidebar
-                    
-            boolean nodeHovered = mouseX >= currentInnerSidebarWidth && mouseX <= totalWidth &&
-                                mouseY >= contentY && mouseY < contentY + NODE_HEIGHT;
+            hoveredNodeType = null;
 
-            if (nodeHovered) {
-                hoveredNodeType = nodeType;
-                context.fill(currentInnerSidebarWidth, contentY, totalWidth, contentY + NODE_HEIGHT, HOVER_COLOR);
-            }
+            if (hasGroupedContent(selectedCategory)) {
+                outer:
+                for (NodeGroup group : getGroupsForCategory(selectedCategory)) {
+                    if (group.isEmpty()) {
+                        continue;
+                    }
 
-            // Node color indicator (using category color) - proper square/rectangle
-            int indicatorSize = 12;
-            int indicatorX = currentInnerSidebarWidth + 8; // Align with category title
-            int indicatorY = contentY + 3;
-            context.fill(indicatorX, indicatorY, indicatorX + indicatorSize, indicatorY + indicatorSize, nodeType.getColor());
-                    context.drawBorder(indicatorX, indicatorY, indicatorSize, indicatorSize, 0xFF000000);
-                    
-                    // Node name
+                    if (contentY >= sidebarBottom) {
+                        break;
+                    }
+
                     context.drawTextWithShadow(
                         textRenderer,
-                        Text.literal(nodeType.getDisplayName()),
-                        indicatorX + indicatorSize + 4, // Position after the indicator with some spacing
-                        contentY + 4,
-                        WHITE_MUTED
+                        Text.literal(group.getTitle()),
+                        currentInnerSidebarWidth + 8,
+                        contentY + 2,
+                        GREY_LINE
                     );
-                    
-                    contentY += NODE_HEIGHT;
+
+                    contentY += GROUP_HEADER_HEIGHT;
+
+                    for (NodeType nodeType : group.getNodes()) {
+                        if (contentY >= sidebarBottom) {
+                            break outer;
+                        }
+
+                        boolean nodeHovered = mouseX >= currentInnerSidebarWidth && mouseX <= totalWidth &&
+                                            mouseY >= contentY && mouseY < contentY + NODE_HEIGHT;
+
+                        if (nodeHovered) {
+                            hoveredNodeType = nodeType;
+                            context.fill(currentInnerSidebarWidth, contentY, totalWidth, contentY + NODE_HEIGHT, HOVER_COLOR);
+                        }
+
+                        int indicatorSize = 12;
+                        int indicatorX = currentInnerSidebarWidth + 8;
+                        int indicatorY = contentY + 3;
+                        context.fill(indicatorX, indicatorY, indicatorX + indicatorSize, indicatorY + indicatorSize, nodeType.getColor());
+                        context.drawBorder(indicatorX, indicatorY, indicatorSize, indicatorSize, 0xFF000000);
+
+                        context.drawTextWithShadow(
+                            textRenderer,
+                            Text.literal(nodeType.getDisplayName()),
+                            indicatorX + indicatorSize + 4,
+                            contentY + 4,
+                            WHITE_MUTED
+                        );
+
+                        contentY += NODE_HEIGHT;
+                    }
+                }
+            } else {
+                // Render nodes in selected category
+                List<NodeType> nodes = categoryNodes.get(selectedCategory);
+                if (nodes != null) {
+                    for (NodeType nodeType : nodes) {
+                        if (contentY >= sidebarBottom) break; // Don't render beyond sidebar
+                        
+                        boolean nodeHovered = mouseX >= currentInnerSidebarWidth && mouseX <= totalWidth &&
+                                            mouseY >= contentY && mouseY < contentY + NODE_HEIGHT;
+
+                        if (nodeHovered) {
+                            hoveredNodeType = nodeType;
+                            context.fill(currentInnerSidebarWidth, contentY, totalWidth, contentY + NODE_HEIGHT, HOVER_COLOR);
+                        }
+
+                        int indicatorSize = 12;
+                        int indicatorX = currentInnerSidebarWidth + 8; // Align with category title
+                        int indicatorY = contentY + 3;
+                        context.fill(indicatorX, indicatorY, indicatorX + indicatorSize, indicatorY + indicatorSize, nodeType.getColor());
+                        context.drawBorder(indicatorX, indicatorY, indicatorSize, indicatorSize, 0xFF000000);
+                        
+                        context.drawTextWithShadow(
+                            textRenderer,
+                            Text.literal(nodeType.getDisplayName()),
+                            indicatorX + indicatorSize + 4, // Position after the indicator with some spacing
+                            contentY + 4,
+                            WHITE_MUTED
+                        );
+                        
+                        contentY += NODE_HEIGHT;
+                    }
                 }
             }
         }
@@ -342,5 +514,34 @@ public class Sidebar {
         int g = Math.min(255, (int) (((color >> 8) & 0xFF) * factor));
         int b = Math.min(255, (int) ((color & 0xFF) * factor));
         return (a << 24) | (r << 16) | (g << 8) | b;
+    }
+
+    private static class NodeGroup {
+        private final String title;
+        private final List<NodeType> nodes;
+
+        NodeGroup(String title, NodeType... nodeTypes) {
+            this.title = title;
+            this.nodes = new ArrayList<>();
+            if (nodeTypes != null) {
+                for (NodeType type : nodeTypes) {
+                    if (type != null && type.isDraggableFromSidebar()) {
+                        this.nodes.add(type);
+                    }
+                }
+            }
+        }
+
+        public String getTitle() {
+            return title;
+        }
+
+        public List<NodeType> getNodes() {
+            return nodes;
+        }
+
+        public boolean isEmpty() {
+            return nodes.isEmpty();
+        }
     }
 }

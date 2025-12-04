@@ -274,10 +274,31 @@ public class Node {
     }
     
     public void setMode(NodeMode mode) {
+        // Preserve existing parameter values when mode doesn't change
+        boolean modeChanged = this.mode != mode;
+        Map<String, String> preservedValues = new HashMap<>();
+        if (!modeChanged) {
+            // Save current parameter values before clearing
+            for (NodeParameter param : parameters) {
+                preservedValues.put(param.getName(), param.getStringValue());
+            }
+        }
+        
         this.mode = mode;
         // Reinitialize parameters when mode changes
         parameters.clear();
         initializeParameters();
+        
+        // Restore preserved values if mode didn't change
+        if (!modeChanged && !preservedValues.isEmpty()) {
+            for (NodeParameter param : parameters) {
+                String preservedValue = preservedValues.get(param.getName());
+                if (preservedValue != null) {
+                    param.setStringValue(preservedValue);
+                }
+            }
+        }
+        
         recalculateDimensions();
         resetControlState();
     }
@@ -832,7 +853,13 @@ public class Node {
     }
 
     public boolean hasAmountInputField() {
-        return type == NodeType.COLLECT && (mode == null || mode == NodeMode.COLLECT_SINGLE);
+        if (type == NodeType.COLLECT && (mode == null || mode == NodeMode.COLLECT_SINGLE)) {
+            return true;
+        }
+        if (type == NodeType.CRAFT && (mode == null || mode == NodeMode.CRAFT_PLAYER_GUI || mode == NodeMode.CRAFT_CRAFTING_TABLE)) {
+            return true;
+        }
+        return false;
     }
 
     public int getAmountFieldDisplayHeight() {
@@ -1022,7 +1049,21 @@ public class Node {
     }
 
     public boolean attachParameter(Node parameter, int slotIndex) {
-        if (!canAcceptParameterAt(slotIndex) || parameter == null || !parameter.isParameterNode() || parameter == this) {
+        if (parameter == null || !parameter.isParameterNode() || parameter == this) {
+            return false;
+        }
+        if ((type == NodeType.PLACE || type == NodeType.PLACE_HAND)
+            && slotIndex == 1
+            && parameter.getType() != null) {
+            NodeType parameterType = parameter.getType();
+            if (parameterType == NodeType.PARAM_BLOCK
+                || parameterType == NodeType.PARAM_BLOCK_LIST
+                || parameterType == NodeType.PARAM_PLACE_TARGET) {
+                // Block-type parameters should always occupy the first slot
+                slotIndex = 0;
+            }
+        }
+        if (!canAcceptParameterAt(slotIndex)) {
             return false;
         }
 
@@ -1437,7 +1478,7 @@ public class Node {
                 case CRAFT_PLAYER_GUI:
                 case CRAFT_CRAFTING_TABLE:
                     parameters.add(new NodeParameter("Item", ParameterType.STRING, "stick"));
-                    parameters.add(new NodeParameter("Quantity", ParameterType.INTEGER, "1"));
+                    parameters.add(new NodeParameter("Amount", ParameterType.INTEGER, "1"));
                     break;
 
                 // FARM modes
@@ -1637,7 +1678,6 @@ public class Node {
                 break;
             case PARAM_ITEM:
                 parameters.add(new NodeParameter("Item", ParameterType.STRING, "minecraft:stick"));
-                parameters.add(new NodeParameter("Count", ParameterType.INTEGER, "1"));
                 break;
             case PARAM_ENTITY:
                 parameters.add(new NodeParameter("Entity", ParameterType.STRING, "minecraft:cow"));
@@ -1780,11 +1820,7 @@ public class Node {
                 break;
             }
             case PARAM_ITEM: {
-                String count = values.get("Count");
-                if (count != null) {
-                    values.put("Quantity", count);
-                    values.put(normalizeParameterKey("Quantity"), count);
-                }
+                // No special parameter mapping needed
                 break;
             }
             case PARAM_INVENTORY_SLOT: {
@@ -2183,6 +2219,16 @@ public class Node {
                 handled = true;
             } else if (future != null && future.isDone()) {
                 return ParameterHandlingResult.COMPLETE;
+            }
+        }
+
+        // Special case: block parameters in slot 0 of PLACE/PLACE_HAND nodes are valid
+        // even when usages is empty (they provide block type, not position)
+        if (!handled && usages.isEmpty() && (type == NodeType.PLACE || type == NodeType.PLACE_HAND)) {
+            NodeType parameterType = parameterNode.getType();
+            if ((parameterType == NodeType.PARAM_BLOCK || parameterType == NodeType.PARAM_BLOCK_LIST)
+                && parameterNode.parentParameterSlotIndex == 0) {
+                handled = true;
             }
         }
 
@@ -2590,9 +2636,17 @@ public class Node {
             return;
         }
         if (parameterNode != null
-            && (this.type == NodeType.PLACE || this.type == NodeType.PLACE_HAND)
-            && parameterNode.getType() == NodeType.PARAM_CLOSEST) {
-            return;
+            && (this.type == NodeType.PLACE || this.type == NodeType.PLACE_HAND)) {
+            NodeType parameterType = parameterNode.getType();
+            // Allow PARAM_CLOSEST in any slot
+            if (parameterType == NodeType.PARAM_CLOSEST) {
+                return;
+            }
+            // Allow block parameters in slot 0 (they provide block type, not position)
+            if ((parameterType == NodeType.PARAM_BLOCK || parameterType == NodeType.PARAM_BLOCK_LIST)
+                && parameterNode.parentParameterSlotIndex == 0) {
+                return;
+            }
         }
         sendNodeErrorMessage(client, "Parameter \"" + parameterNode.getType().getDisplayName() + "\" cannot be used with \"" + this.type.getDisplayName() + "\".");
     }
@@ -3369,13 +3423,13 @@ public class Node {
         int quantity = 1;
 
         NodeParameter itemParam = getParameter("Item");
-        NodeParameter quantityParam = getParameter("Quantity");
+        NodeParameter amountParam = getParameter("Amount");
 
         if (itemParam != null) {
             itemId = itemParam.getStringValue();
         }
-        if (quantityParam != null) {
-            quantity = quantityParam.getIntValue();
+        if (amountParam != null) {
+            quantity = amountParam.getIntValue();
         }
 
         NodeMode craftMode = mode != null ? mode : NodeMode.CRAFT_PLAYER_GUI;
@@ -3420,9 +3474,16 @@ public class Node {
             effectiveCraftMode = craftMode;
         }
 
-        RecipeEntry<CraftingRecipe> recipeEntry = findCraftingRecipe(client, targetItem, effectiveCraftMode);
+        java.util.concurrent.atomic.AtomicBoolean requiresCraftingTable = new java.util.concurrent.atomic.AtomicBoolean(false);
+        RecipeEntry<CraftingRecipe> recipeEntry = findCraftingRecipe(client, targetItem, effectiveCraftMode, requiresCraftingTable);
         if (recipeEntry == null) {
-            sendNodeErrorMessage(client, "Cannot craft " + itemDisplayName + ": no matching recipe found.");
+            String message;
+            if (effectiveCraftMode == NodeMode.CRAFT_PLAYER_GUI && requiresCraftingTable.get()) {
+                message = "Cannot craft " + itemDisplayName + ": recipe requires a crafting table.";
+            } else {
+                message = "Cannot craft " + itemDisplayName + ": no matching recipe found.";
+            }
+            sendNodeErrorMessage(client, message);
             future.complete(null);
             return;
         }
@@ -3598,7 +3659,10 @@ public class Node {
         return false;
     }
 
-    private RecipeEntry<CraftingRecipe> findCraftingRecipe(net.minecraft.client.MinecraftClient client, Item targetItem, NodeMode craftMode) {
+    private RecipeEntry<CraftingRecipe> findCraftingRecipe(net.minecraft.client.MinecraftClient client,
+                                                           Item targetItem,
+                                                           NodeMode craftMode,
+                                                           java.util.concurrent.atomic.AtomicBoolean requiresCraftingTable) {
         MinecraftServer server = client.getServer();
         if (server == null) {
             return null;
@@ -3617,12 +3681,15 @@ public class Node {
                 continue;
             }
 
-            if (craftMode == NodeMode.CRAFT_PLAYER_GUI && !recipeFitsPlayerGrid(craftingRecipe.getIngredientPlacement())) {
+            ItemStack result = craftingRecipe.craft(CraftingRecipeInput.create(3, 3, emptyGrid), client.player.getWorld().getRegistryManager());
+            if (!result.isOf(targetItem)) {
                 continue;
             }
 
-            ItemStack result = craftingRecipe.craft(CraftingRecipeInput.create(3, 3, emptyGrid), client.player.getWorld().getRegistryManager());
-            if (!result.isOf(targetItem)) {
+            if (craftMode == NodeMode.CRAFT_PLAYER_GUI && !recipeFitsPlayerGrid(craftingRecipe)) {
+                if (requiresCraftingTable != null) {
+                    requiresCraftingTable.set(true);
+                }
                 continue;
             }
 
@@ -3647,7 +3714,16 @@ public class Node {
         }
     }
 
-    private boolean recipeFitsPlayerGrid(IngredientPlacement placement) {
+    private boolean recipeFitsPlayerGrid(CraftingRecipe recipe) {
+        if (recipe == null) {
+            return false;
+        }
+
+        if (recipe instanceof ShapedRecipe shapedRecipe) {
+            return shapedRecipe.getWidth() <= 2 && shapedRecipe.getHeight() <= 2;
+        }
+
+        IngredientPlacement placement = recipe.getIngredientPlacement();
         if (placement == null) {
             return false;
         }

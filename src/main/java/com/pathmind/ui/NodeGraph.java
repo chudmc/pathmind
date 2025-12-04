@@ -19,6 +19,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -2070,6 +2071,32 @@ public class NodeGraph {
 
     public List<NodeConnection> getConnections() {
         return connections;
+    }
+    
+    /**
+     * Collects the names of all EVENT_FUNCTION nodes currently in the workspace.
+     * Returns them in insertion order with duplicates removed.
+     */
+    public List<String> getFunctionNames() {
+        LinkedHashSet<String> names = new LinkedHashSet<>();
+        for (Node node : nodes) {
+            if (node.getType() != NodeType.EVENT_FUNCTION) {
+                continue;
+            }
+            NodeParameter nameParam = node.getParameter("Name");
+            if (nameParam == null) {
+                continue;
+            }
+            String value = nameParam.getStringValue();
+            if (value == null) {
+                continue;
+            }
+            String trimmed = value.trim();
+            if (!trimmed.isEmpty()) {
+                names.add(trimmed);
+            }
+        }
+        return new ArrayList<>(names);
     }
     
     public int getCameraX() {

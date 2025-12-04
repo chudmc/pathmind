@@ -491,7 +491,9 @@ public class PathmindVisualEditorScreen extends Screen {
                 nodeGraph.stopCoordinateEditing(true);
 
                 // Check for double-click to open parameter editor
-                boolean shouldOpenOverlay = clickedNode.isParameterNode();
+                boolean shouldOpenOverlay = clickedNode.isParameterNode()
+                    || clickedNode.getType() == NodeType.EVENT_CALL
+                    || clickedNode.getType() == NodeType.EVENT_FUNCTION;
                 if (shouldOpenOverlay &&
                     nodeGraph.handleNodeClick(clickedNode, (int)mouseX, (int)mouseY)) {
                     // Open parameter overlay
@@ -502,7 +504,9 @@ public class PathmindVisualEditorScreen extends Screen {
                         this.width,
                         this.height,
                         TITLE_BAR_HEIGHT,
-                        () -> parameterOverlay = null // Clear reference on close
+                        () -> parameterOverlay = null, // Clear reference on close
+                        nodeGraph::notifyNodeParametersChanged,
+                        () -> nodeGraph.getFunctionNames()
                     );
                     parameterOverlay.init();
                     parameterOverlay.show();

@@ -3,12 +3,15 @@ package com.pathmind.ui;
 import com.pathmind.nodes.Node;
 import com.pathmind.nodes.NodeParameter;
 import com.pathmind.nodes.NodeMode;
+import com.pathmind.nodes.NodeType;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.widget.ButtonWidget;
 import net.minecraft.client.font.TextRenderer;
 import net.minecraft.text.Text;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 /**
  * Overlay widget for editing node parameters.
@@ -47,6 +50,8 @@ public class NodeParameterOverlay {
     private ButtonWidget saveButton;
     private ButtonWidget cancelButton;
     private final Runnable onClose;
+    private final Consumer<Node> onSave;
+    private final Supplier<List<String>> functionNameSupplier;
     private boolean visible = false;
     private int focusedFieldIndex = -1;
     
@@ -55,18 +60,34 @@ public class NodeParameterOverlay {
     private final List<NodeMode> availableModes;
     private boolean modeDropdownOpen = false;
     private int modeDropdownHoverIndex = -1;
+    
+    // Function selection dropdown (Call Function node)
+    private final List<String> functionNameOptions;
+    private int functionDropdownParamIndex = -1;
+    private boolean functionDropdownOpen = false;
+    private int functionDropdownHoverIndex = -1;
+    private int functionDropdownFieldX = 0;
+    private int functionDropdownFieldY = 0;
+    private int functionDropdownFieldWidth = 0;
+    private int functionDropdownFieldHeight = 0;
+    private boolean functionDropdownEnabled = false;
 
-    public NodeParameterOverlay(Node node, int screenWidth, int screenHeight, int topBarHeight, Runnable onClose) {
+    public NodeParameterOverlay(Node node, int screenWidth, int screenHeight, int topBarHeight, Runnable onClose,
+                                Consumer<Node> onSave,
+                                Supplier<List<String>> functionNameSupplier) {
         this.node = node;
         this.onClose = onClose;
+        this.onSave = onSave;
         this.parameterValues = new ArrayList<>();
         this.fieldFocused = new ArrayList<>();
         this.screenWidth = screenWidth;
         this.screenHeight = screenHeight;
         this.topBarHeight = topBarHeight;
+        this.functionNameSupplier = functionNameSupplier;
         
         // Initialize mode selection
         this.availableModes = new ArrayList<>();
+        this.functionNameOptions = new ArrayList<>();
         NodeMode[] modes = NodeMode.getModesForNodeType(node.getType());
         if (modes != null) {
             for (NodeMode mode : modes) {
@@ -74,12 +95,14 @@ public class NodeParameterOverlay {
             }
         }
         this.selectedMode = node.getMode();
+        this.functionDropdownParamIndex = findFunctionDropdownIndex(node);
         
         updatePopupDimensions();
     }
 
     public void init() {
         resetParameterFields();
+        refreshFunctionNameOptions();
         updatePopupDimensions();
         recreateButtons();
         scrollOffset = Math.min(scrollOffset, maxScroll);
@@ -171,25 +194,62 @@ public class NodeParameterOverlay {
             int fieldY = sectionY + LABEL_TO_FIELD_OFFSET;
             int fieldWidth = popupWidth - 40;
             int fieldHeight = FIELD_HEIGHT;
+            boolean isDropdownField = usesFunctionDropdownForIndex(i);
+            if (isDropdownField) {
+                functionDropdownFieldX = fieldX;
+                functionDropdownFieldY = fieldY;
+                functionDropdownFieldWidth = fieldWidth;
+                functionDropdownFieldHeight = fieldHeight;
+            }
 
-            boolean isFocused = i == focusedFieldIndex;
-            int bgColor = isFocused ? 0xFF2A2A2A : 0xFF1A1A1A;
-            int borderColor = isFocused ? 0xFF87CEEB : 0xFF666666;
+            boolean dropdownActive = isDropdownField && functionDropdownOpen;
+            boolean isFocused = !isDropdownField && i == focusedFieldIndex;
+            int bgColor;
+            int borderColor;
+            if (dropdownActive) {
+                bgColor = adjustColorBrightness(0xFF1A1A1A, 1.2f);
+                borderColor = 0xFF87CEEB;
+            } else if (isFocused) {
+                bgColor = 0xFF2A2A2A;
+                borderColor = 0xFF87CEEB;
+            } else {
+                bgColor = 0xFF1A1A1A;
+                borderColor = 0xFF666666;
+            }
 
             context.fill(fieldX, fieldY, fieldX + fieldWidth, fieldY + fieldHeight, bgColor);
             context.drawBorder(fieldX, fieldY, fieldWidth, fieldHeight, borderColor);
 
             String text = parameterValues.get(i);
-            if (text != null && !text.isEmpty()) {
+            if (isDropdownField) {
+            String displayValue;
+            int textColor;
+            if (!functionDropdownEnabled) {
+                displayValue = "";
+                textColor = 0xFF666666;
+            } else {
+                displayValue = (text == null || text.isEmpty()) ? "select function" : text;
+                textColor = (text == null || text.isEmpty()) ? 0xFFAAAAAA : 0xFFFFFFFF;
+            }
+            int availableWidth = fieldWidth - 24;
+            String displayText = trimDisplayString(textRenderer, displayValue, availableWidth);
+            context.drawTextWithShadow(
+                textRenderer,
+                Text.literal(displayText),
+                fieldX + 4,
+                fieldY + 6,
+                textColor
+            );
+            context.drawTextWithShadow(
+                textRenderer,
+                Text.literal("▼"),
+                fieldX + fieldWidth - 14,
+                fieldY + 6,
+                functionDropdownEnabled ? 0xFFE0E0E0 : 0xFF555555
+            );
+        } else if (text != null && !text.isEmpty()) {
                 int availableWidth = fieldWidth - 8;
-                String displayText = textRenderer.trimToWidth(text, availableWidth);
-
-                if (!displayText.equals(text)) {
-                    int ellipsisWidth = textRenderer.getWidth("...");
-                    int trimmedWidth = Math.max(0, availableWidth - ellipsisWidth);
-                    String trimmed = textRenderer.trimToWidth(text, trimmedWidth);
-                    displayText = trimmed + "...";
-                }
+                String displayText = trimDisplayString(textRenderer, text, availableWidth);
 
                 context.drawTextWithShadow(
                     textRenderer,
@@ -200,7 +260,7 @@ public class NodeParameterOverlay {
                 );
             }
 
-            if (isFocused && (System.currentTimeMillis() / 500) % 2 == 0) {
+            if (!isDropdownField && isFocused && (System.currentTimeMillis() / 500) % 2 == 0) {
                 String value = text != null ? text : "";
                 int cursorX = fieldX + 4 + textRenderer.getWidth(value);
                 cursorX = Math.min(cursorX, fieldX + fieldWidth - 2);
@@ -258,6 +318,10 @@ public class NodeParameterOverlay {
             }
         }
 
+        if (functionDropdownOpen) {
+            renderFunctionDropdown(context, textRenderer, mouseX, mouseY);
+        }
+
         renderScrollbar(context, contentTop, contentBottom);
     }
 
@@ -307,6 +371,69 @@ public class NodeParameterOverlay {
         context.fill(trackLeft + 1, knobTop, trackRight - 1, knobTop + knobHeight, 0xFF777777);
     }
 
+    private void renderFunctionDropdown(DrawContext context, TextRenderer textRenderer, int mouseX, int mouseY) {
+        if (!functionDropdownOpen || functionDropdownParamIndex < 0 || !functionDropdownEnabled) {
+            return;
+        }
+
+        int dropdownX = functionDropdownFieldX;
+        int dropdownY = functionDropdownFieldY + functionDropdownFieldHeight;
+        int dropdownWidth = functionDropdownFieldWidth;
+        List<String> options = functionNameOptions;
+        int optionCount = Math.max(1, options.isEmpty() ? 1 : options.size());
+        int dropdownHeight = optionCount * DROPDOWN_OPTION_HEIGHT;
+
+        boolean hoverInside = mouseX >= dropdownX && mouseX <= dropdownX + dropdownWidth &&
+                              mouseY >= dropdownY && mouseY <= dropdownY + dropdownHeight;
+        functionDropdownHoverIndex = -1;
+        if (hoverInside && !options.isEmpty()) {
+            int hoverIndex = (mouseY - dropdownY) / DROPDOWN_OPTION_HEIGHT;
+            if (hoverIndex >= 0 && hoverIndex < options.size()) {
+                functionDropdownHoverIndex = hoverIndex;
+            }
+        }
+
+        context.fill(dropdownX, dropdownY, dropdownX + dropdownWidth, dropdownY + dropdownHeight, 0xFF1A1A1A);
+        context.drawBorder(dropdownX, dropdownY, dropdownWidth, dropdownHeight, 0xFF666666);
+
+        if (options.isEmpty()) {
+            int textY = dropdownY + (DROPDOWN_OPTION_HEIGHT - textRenderer.fontHeight) / 2 + 1;
+            context.drawTextWithShadow(
+                textRenderer,
+                Text.literal("No functions available"),
+                dropdownX + 4,
+                textY,
+                0xFFAAAAAA
+            );
+            return;
+        }
+
+        String currentValue = parameterValues.size() > functionDropdownParamIndex
+            ? parameterValues.get(functionDropdownParamIndex)
+            : null;
+
+        for (int i = 0; i < options.size(); i++) {
+            int optionTop = dropdownY + i * DROPDOWN_OPTION_HEIGHT;
+            boolean isHovered = i == functionDropdownHoverIndex;
+            boolean isSelected = currentValue != null && currentValue.equals(options.get(i));
+
+            int optionColor = isSelected ? adjustColorBrightness(0xFF1A1A1A, 0.9f) : 0xFF1A1A1A;
+            if (isHovered) {
+                optionColor = adjustColorBrightness(optionColor, 1.2f);
+            }
+
+            context.fill(dropdownX, optionTop, dropdownX + dropdownWidth, optionTop + DROPDOWN_OPTION_HEIGHT, optionColor);
+            String display = trimDisplayString(textRenderer, options.get(i), dropdownWidth - 8);
+            context.drawTextWithShadow(
+                textRenderer,
+                Text.literal(display),
+                dropdownX + 4,
+                optionTop + 6,
+                0xFFFFFFFF
+            );
+        }
+    }
+
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
         if (!visible) return false;
 
@@ -347,6 +474,8 @@ public class NodeParameterOverlay {
 
             if (modeVisible && mouseX >= modeButtonX && mouseX <= modeButtonX + modeButtonWidth &&
                 mouseY >= Math.max(modeButtonY, contentTop) && mouseY <= Math.min(modeButtonY + modeButtonHeight, contentBottom)) {
+                functionDropdownOpen = false;
+                functionDropdownHoverIndex = -1;
                 modeDropdownOpen = !modeDropdownOpen;
                 modeDropdownHoverIndex = -1;
                 return true;
@@ -371,14 +500,31 @@ public class NodeParameterOverlay {
             int fieldY = labelY + LABEL_TO_FIELD_OFFSET; // Match the rendering position
             int fieldWidth = popupWidth - 40;
             int fieldHeight = FIELD_HEIGHT;
+            boolean isDropdownField = usesFunctionDropdownForIndex(i);
+            if (isDropdownField) {
+                functionDropdownFieldX = fieldX;
+                functionDropdownFieldY = fieldY;
+                functionDropdownFieldWidth = fieldWidth;
+                functionDropdownFieldHeight = fieldHeight;
+            }
 
             if (mouseX >= fieldX && mouseX <= fieldX + fieldWidth &&
                 mouseY >= Math.max(fieldY, contentTop) && mouseY <= Math.min(fieldY + fieldHeight, contentBottom)) {
-                focusedFieldIndex = i;
+                if (isDropdownField) {
+                    if (functionDropdownEnabled) {
+                        toggleFunctionDropdown();
+                    }
+                } else {
+                    focusedFieldIndex = i;
+                }
                 return true;
             }
 
             labelY = fieldY + fieldHeight + SECTION_SPACING;
+        }
+
+        if (handleFunctionDropdownClick(mouseX, mouseY)) {
+            return true;
         }
 
         // Close dropdown if clicking outside of it
@@ -398,9 +544,26 @@ public class NodeParameterOverlay {
             }
         }
         
+        if (functionDropdownOpen) {
+            int dropdownX = functionDropdownFieldX;
+            int dropdownY = functionDropdownFieldY + functionDropdownFieldHeight;
+            int dropdownWidth = functionDropdownFieldWidth;
+            int optionCount = Math.max(1, functionNameOptions.isEmpty() ? 1 : functionNameOptions.size());
+            int dropdownHeight = optionCount * DROPDOWN_OPTION_HEIGHT;
+            boolean insideField = mouseX >= functionDropdownFieldX && mouseX <= functionDropdownFieldX + functionDropdownFieldWidth &&
+                                  mouseY >= functionDropdownFieldY && mouseY <= functionDropdownFieldY + functionDropdownFieldHeight;
+            boolean insideDropdown = mouseX >= dropdownX && mouseX <= dropdownX + dropdownWidth &&
+                                     mouseY >= dropdownY && mouseY <= dropdownY + dropdownHeight;
+            if (!insideField && !insideDropdown) {
+                functionDropdownOpen = false;
+                functionDropdownHoverIndex = -1;
+            }
+        }
+        
         // Close if clicking outside the popup
-        if (mouseX < popupX || mouseX > popupX + popupWidth ||
-            mouseY < popupY || mouseY > popupY + popupHeight) {
+        boolean insidePopupBounds = mouseX >= popupX && mouseX <= popupX + popupWidth &&
+                                    mouseY >= popupY && mouseY <= popupY + popupHeight;
+        if (!insidePopupBounds && !isPointInFunctionDropdownArea(mouseX, mouseY)) {
             close();
             return true;
         }
@@ -446,7 +609,7 @@ public class NodeParameterOverlay {
             
             // Handle tab to move to next field
             if (keyCode == 258) { // Tab key
-                focusedFieldIndex = (focusedFieldIndex + 1) % node.getParameters().size();
+                focusNextEditableField();
                 return true;
             }
         }
@@ -508,6 +671,10 @@ public class NodeParameterOverlay {
 
         node.recalculateDimensions();
 
+        if (onSave != null) {
+            onSave.accept(node);
+        }
+
         close();
     }
 
@@ -515,6 +682,8 @@ public class NodeParameterOverlay {
         visible = false;
         modeDropdownOpen = false;
         modeDropdownHoverIndex = -1;
+        functionDropdownOpen = false;
+        functionDropdownHoverIndex = -1;
         if (onClose != null) {
             onClose.run();
         }
@@ -525,6 +694,8 @@ public class NodeParameterOverlay {
         focusedFieldIndex = -1;
         modeDropdownOpen = false;
         modeDropdownHoverIndex = -1;
+        functionDropdownOpen = false;
+        functionDropdownHoverIndex = -1;
         scrollOffset = 0;
         updateButtonPositions();
     }
@@ -651,6 +822,142 @@ public class NodeParameterOverlay {
         int topLimit = popupY + CONTENT_START_OFFSET;
         int clamped = Math.min(base, bottomLimit);
         return Math.max(clamped, topLimit);
+    }
+
+    private int findFunctionDropdownIndex(Node node) {
+        if (node == null || node.getType() != NodeType.EVENT_CALL) {
+            return -1;
+        }
+        List<NodeParameter> params = node.getParameters();
+        for (int i = 0; i < params.size(); i++) {
+            NodeParameter param = params.get(i);
+            if (param != null && "Name".equals(param.getName())) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private void focusNextEditableField() {
+        int total = node.getParameters().size();
+        if (total == 0) {
+            focusedFieldIndex = -1;
+            return;
+        }
+        int nextIndex = focusedFieldIndex;
+        for (int attempts = 0; attempts < total; attempts++) {
+            nextIndex = (nextIndex + 1 + total) % total;
+            if (!usesFunctionDropdownForIndex(nextIndex)) {
+                focusedFieldIndex = nextIndex;
+                return;
+            }
+        }
+        focusedFieldIndex = -1;
+    }
+
+    private boolean usesFunctionDropdownForIndex(int index) {
+        return functionDropdownParamIndex >= 0 && index == functionDropdownParamIndex;
+    }
+
+    private void toggleFunctionDropdown() {
+        if (functionDropdownParamIndex < 0 || !functionDropdownEnabled) {
+            return;
+        }
+        if (functionDropdownOpen) {
+            functionDropdownOpen = false;
+            functionDropdownHoverIndex = -1;
+            return;
+        }
+        modeDropdownOpen = false;
+        modeDropdownHoverIndex = -1;
+        refreshFunctionNameOptions();
+        functionDropdownOpen = true;
+        functionDropdownHoverIndex = -1;
+        focusedFieldIndex = -1;
+    }
+
+    private boolean handleFunctionDropdownClick(double mouseX, double mouseY) {
+        if (!functionDropdownOpen || functionDropdownParamIndex < 0 || !functionDropdownEnabled) {
+            return false;
+        }
+        int dropdownX = functionDropdownFieldX;
+        int dropdownY = functionDropdownFieldY + functionDropdownFieldHeight;
+        int dropdownWidth = functionDropdownFieldWidth;
+        int optionCount = Math.max(1, functionNameOptions.isEmpty() ? 1 : functionNameOptions.size());
+        int dropdownHeight = optionCount * DROPDOWN_OPTION_HEIGHT;
+
+        if (mouseX >= dropdownX && mouseX <= dropdownX + dropdownWidth &&
+            mouseY >= dropdownY && mouseY <= dropdownY + dropdownHeight) {
+            if (!functionNameOptions.isEmpty()) {
+                int optionIndex = (int) ((mouseY - dropdownY) / DROPDOWN_OPTION_HEIGHT);
+                if (optionIndex >= 0 && optionIndex < functionNameOptions.size()) {
+                    parameterValues.set(functionDropdownParamIndex, functionNameOptions.get(optionIndex));
+                }
+            }
+            functionDropdownOpen = false;
+            functionDropdownHoverIndex = -1;
+            return true;
+        }
+        return false;
+    }
+
+    private void refreshFunctionNameOptions() {
+        functionNameOptions.clear();
+        if (functionNameSupplier != null) {
+            List<String> supplied = functionNameSupplier.get();
+            if (supplied != null) {
+                for (String name : supplied) {
+                    if (name == null) {
+                        continue;
+                    }
+                    String trimmed = name.trim();
+                    if (!trimmed.isEmpty() && !functionNameOptions.contains(trimmed)) {
+                        functionNameOptions.add(trimmed);
+                    }
+                }
+            }
+        }
+        functionDropdownEnabled = !functionNameOptions.isEmpty();
+        if (!functionDropdownEnabled) {
+            functionDropdownOpen = false;
+            functionDropdownHoverIndex = -1;
+        }
+    }
+
+    private boolean isPointInFunctionDropdownArea(double mouseX, double mouseY) {
+        if (functionDropdownParamIndex < 0 || !functionDropdownEnabled) {
+            return false;
+        }
+        boolean insideField = mouseX >= functionDropdownFieldX &&
+                              mouseX <= functionDropdownFieldX + functionDropdownFieldWidth &&
+                              mouseY >= functionDropdownFieldY &&
+                              mouseY <= functionDropdownFieldY + functionDropdownFieldHeight;
+        if (insideField) {
+            return true;
+        }
+        if (!functionDropdownOpen) {
+            return false;
+        }
+        int dropdownX = functionDropdownFieldX;
+        int dropdownY = functionDropdownFieldY + functionDropdownFieldHeight;
+        int dropdownWidth = functionDropdownFieldWidth;
+        int optionCount = Math.max(1, functionNameOptions.isEmpty() ? 1 : functionNameOptions.size());
+        int dropdownHeight = optionCount * DROPDOWN_OPTION_HEIGHT;
+        return mouseX >= dropdownX && mouseX <= dropdownX + dropdownWidth &&
+               mouseY >= dropdownY && mouseY <= dropdownY + dropdownHeight;
+    }
+
+    private String trimDisplayString(TextRenderer renderer, String text, int availableWidth) {
+        if (text == null) {
+            return "";
+        }
+        if (renderer.getWidth(text) <= availableWidth) {
+            return text;
+        }
+        int ellipsisWidth = renderer.getWidth("...");
+        int trimmedWidth = Math.max(0, availableWidth - ellipsisWidth);
+        String trimmed = renderer.trimToWidth(text, trimmedWidth);
+        return trimmed + "...";
     }
 
     private int adjustColorBrightness(int color, float factor) {
