@@ -1232,7 +1232,11 @@ public class Node {
         if (isParameterNode()) {
             return;
         }
+        Map<String, String> existingValues = exportParameterValues();
         resetParametersToDefaults();
+        if (!existingValues.isEmpty()) {
+            applyParameterValuesFromMap(existingValues);
+        }
         if (attachedParameters.isEmpty()) {
             return;
         }

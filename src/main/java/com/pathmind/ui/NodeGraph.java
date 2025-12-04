@@ -1695,7 +1695,7 @@ public class NodeGraph {
                 stopCoordinateEditing(true);
                 return true;
             case GLFW.GLFW_KEY_ESCAPE:
-                stopCoordinateEditing(false);
+                stopCoordinateEditing(true);
                 return true;
             case GLFW.GLFW_KEY_TAB:
                 Node node = coordinateEditingNode;
@@ -1840,7 +1840,7 @@ public class NodeGraph {
                 stopAmountEditing(true);
                 return true;
             case GLFW.GLFW_KEY_ESCAPE:
-                stopAmountEditing(false);
+                stopAmountEditing(true);
                 return true;
             default:
                 return false;
