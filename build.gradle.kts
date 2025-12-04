@@ -48,7 +48,8 @@ dependencies {
     modImplementation("net.fabricmc.fabric-api:fabric-api:${project.property("fabric_api_version")}")
 
     // Baritone API dependency
-    modImplementation(files(baritoneApiJar))
+    val baritoneApi = files(baritoneApiJar)
+    modImplementation(baritoneApi)
 
     // Gson for JSON serialization
     implementation("com.google.code.gson:gson:2.10.1")
@@ -91,6 +92,12 @@ java {
 tasks.jar {
     from("LICENSE") {
         rename { "${it}_${base.archivesName.get()}" }
+    }
+
+    // Bundle the Baritone API jar as a nested library
+    from(baritoneApiJar) {
+        into("META-INF/jars")
+        rename { "baritone-api-fabric-1.15.0.jar" }
     }
 }
 

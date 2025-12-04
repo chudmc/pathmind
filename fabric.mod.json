@@ -1,43 +1,35 @@
 {
   "schemaVersion": 1,
-  "id": "baritone",
-  "version": "1.15.0",
-  "name": "Baritone",
-  "description": "Google Maps for Blockgame",
+  "id": "pathmind",
+  "version": "1.0.0",
+  "name": "Pathmind",
+  "description": "A Minecraft Fabric mod that enhances gameplay with intelligent features.",
   "authors": [
-    "leijurv",
-    "Brady"
+    "YourName"
   ],
   "contact": {
-    "homepage": "https://github.com/cabaletta/baritone",
-    "sources": "https://github.com/cabaletta/baritone",
-    "issues": "https://github.com/cabaletta/baritone/issues"
+    "homepage": "https://github.com/yourusername/pathmind",
+    "sources": "https://github.com/yourusername/pathmind",
+    "issues": "https://github.com/yourusername/pathmind/issues"
   },
-  "license": "LGPL-3.0",
+  "license": "CC BY-NC 4.0",
   "icon": "assets/pathmind/logo.png",
   "environment": "*",
-  "entrypoints": {},
-  "mixins": [
-    "mixins.baritone.json"
-  ],
-  "depends": {
-    "fabricloader": "\u003e\u003d0.14.22",
-    "minecraft": [
-      "1.21.6",
-      "1.21.7",
-      "1.21.8"
+  "entrypoints": {
+    "main": [
+      "com.pathmind.PathmindMod"
+    ],
+    "client": [
+      "com.pathmind.PathmindClientMod"
     ]
   },
-  "custom": {
-    "modmenu": {
-      "links": {
-        "modmenu.discord": "https://discord.gg/s6fRBAUpmr"
-      }
-    }
-  },
-  "jars": [
-    {
-      "file": "META-INF/jars/nether-pathfinder-1.4.1.jar"
-    }
-  ]
+  "mixins": [
+    "pathmind.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.17.2",
+    "minecraft": "~1.21.8",
+    "java": ">=21",
+    "fabric-api": "*"
+  }
 }
