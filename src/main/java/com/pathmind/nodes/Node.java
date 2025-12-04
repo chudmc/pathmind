@@ -3222,52 +3222,66 @@ public class Node {
             return;
         }
 
+        List<String> targets = resolveCollectTargets(future);
+        if (targets.isEmpty()) {
+            return;
+        }
+
         IBaritone baritone = getBaritone();
         if (baritone == null) {
             future.completeExceptionally(new RuntimeException("Baritone not available"));
             return;
         }
-        baritone.api.process.IMineProcess mineProcess = baritone.getMineProcess();
+        IMineProcess mineProcess = baritone.getMineProcess();
         if (mineProcess == null) {
             future.completeExceptionally(new RuntimeException("Mine process not available"));
-            return;
-        }
-
-        List<String> targets = resolveCollectTargets(future);
-        if (targets.isEmpty()) {
             return;
         }
 
         switch (mode) {
             case COLLECT_SINGLE: {
                 int amount = Math.max(1, getIntParameter("Amount", 1));
+                if (hasRequiredBlockAlready(targets.get(0), amount)) {
+                    future.complete(null);
+                    return;
+                }
                 System.out.println("Executing mine by name for " + amount + "x " + targets);
                 PreciseCompletionTracker.getInstance().startTrackingTask(PreciseCompletionTracker.TASK_COLLECT, future);
-                CompletableFuture.runAsync(() -> {
-                    try {
-                        mineProcess.mineByName(amount, targets.toArray(new String[0]));
-                    } catch (Exception e) {
-                        future.completeExceptionally(e);
-                    }
-                });
+                CompletableFuture.runAsync(() -> mineProcess.mineByName(amount, targets.toArray(new String[0])));
                 break;
             }
             case COLLECT_MULTIPLE: {
                 System.out.println("Executing mine by name for blocks: " + targets);
                 PreciseCompletionTracker.getInstance().startTrackingTask(PreciseCompletionTracker.TASK_COLLECT, future);
-                CompletableFuture.runAsync(() -> {
-                    try {
-                        mineProcess.mineByName(targets.toArray(new String[0]));
-                    } catch (Exception e) {
-                        future.completeExceptionally(e);
-                    }
-                });
+                CompletableFuture.runAsync(() -> mineProcess.mineByName(targets.toArray(new String[0])));
                 break;
             }
             default:
                 future.completeExceptionally(new RuntimeException("Unknown COLLECT mode: " + mode));
                 break;
         }
+    }
+
+    private boolean hasRequiredBlockAlready(String blockId, int required) {
+        net.minecraft.client.MinecraftClient client = net.minecraft.client.MinecraftClient.getInstance();
+        if (client == null || client.player == null || blockId == null) {
+            return false;
+        }
+        Identifier identifier = Identifier.tryParse(blockId);
+        if (identifier == null || !Registries.BLOCK.containsId(identifier)) {
+            return false;
+        }
+        Block block = Registries.BLOCK.get(identifier);
+        Item item = block.asItem();
+        if (item == null || item == Items.AIR) {
+            return false;
+        }
+        int count = client.player.getInventory().count(item);
+        if (count >= required) {
+            sendNodeInfoMessage(client, "Already have " + count + " " + blockId + ", skipping mine.");
+            return true;
+        }
+        return false;
     }
     
     private void executeCraftCommand(CompletableFuture<Void> future) {
