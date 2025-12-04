@@ -18,6 +18,7 @@ import baritone.api.process.ICustomGoalProcess;
 import baritone.api.process.IExploreProcess;
 import baritone.api.process.IGetToBlockProcess;
 import baritone.api.process.IFarmProcess;
+import baritone.api.process.IMineProcess;
 import baritone.api.pathing.goals.GoalBlock;
 import baritone.api.utils.BlockOptionalMeta;
 import com.pathmind.execution.PreciseCompletionTracker;
@@ -2604,6 +2605,52 @@ public class Node {
         }
     }
 
+    private List<String> resolveCollectTargets(CompletableFuture<Void> future) {
+        List<String> blockIds = new ArrayList<>();
+
+        if (runtimeParameterData != null) {
+            if (runtimeParameterData.targetBlockIds != null) {
+                for (String id : runtimeParameterData.targetBlockIds) {
+                    addBlockIds(blockIds, id);
+                }
+            } else if (runtimeParameterData.targetBlockId != null) {
+                addBlockIds(blockIds, runtimeParameterData.targetBlockId);
+            }
+        }
+
+        addBlockIds(blockIds, getStringParameter("Block", null));
+        addBlockIds(blockIds, getStringParameter("Blocks", null));
+
+        if (blockIds.isEmpty()) {
+            sendParameterSearchFailure("No block types specified for " + type.getDisplayName() + ".", future);
+            return Collections.emptyList();
+        }
+
+        List<String> targets = new ArrayList<>();
+        for (String idString : blockIds) {
+            Identifier identifier = Identifier.tryParse(idString);
+            if (identifier == null || !Registries.BLOCK.containsId(identifier)) {
+                sendParameterSearchFailure("Unknown block \"" + idString + "\" for " + type.getDisplayName() + ".", future);
+                return Collections.emptyList();
+            }
+            targets.add(identifier.toString());
+        }
+
+        return targets;
+    }
+
+    private void addBlockIds(List<String> blockIds, String rawValue) {
+        if (rawValue == null) {
+            return;
+        }
+        for (String entry : rawValue.split(",")) {
+            String trimmed = entry.trim();
+            if (!trimmed.isEmpty() && !blockIds.contains(trimmed)) {
+                blockIds.add(trimmed);
+            }
+        }
+    }
+
     private Optional<BlockPos> findNearestBlock(net.minecraft.client.MinecraftClient client, List<Block> blocks, double range) {
         if (client == null || client.player == null || client.world == null || blocks == null || blocks.isEmpty()) {
             return Optional.empty();
@@ -3167,7 +3214,60 @@ public class Node {
     }
     
     private void executeCollectCommand(CompletableFuture<Void> future) {
-        future.complete(null);
+        if (preprocessAttachedParameter(EnumSet.noneOf(ParameterUsage.class), future) == ParameterHandlingResult.COMPLETE) {
+            return;
+        }
+        if (mode == null) {
+            future.completeExceptionally(new RuntimeException("No mode set for COLLECT node"));
+            return;
+        }
+
+        IBaritone baritone = getBaritone();
+        if (baritone == null) {
+            future.completeExceptionally(new RuntimeException("Baritone not available"));
+            return;
+        }
+        baritone.api.process.IMineProcess mineProcess = baritone.getMineProcess();
+        if (mineProcess == null) {
+            future.completeExceptionally(new RuntimeException("Mine process not available"));
+            return;
+        }
+
+        List<String> targets = resolveCollectTargets(future);
+        if (targets.isEmpty()) {
+            return;
+        }
+
+        switch (mode) {
+            case COLLECT_SINGLE: {
+                int amount = Math.max(1, getIntParameter("Amount", 1));
+                System.out.println("Executing mine by name for " + amount + "x " + targets);
+                PreciseCompletionTracker.getInstance().startTrackingTask(PreciseCompletionTracker.TASK_COLLECT, future);
+                CompletableFuture.runAsync(() -> {
+                    try {
+                        mineProcess.mineByName(amount, targets.toArray(new String[0]));
+                    } catch (Exception e) {
+                        future.completeExceptionally(e);
+                    }
+                });
+                break;
+            }
+            case COLLECT_MULTIPLE: {
+                System.out.println("Executing mine by name for blocks: " + targets);
+                PreciseCompletionTracker.getInstance().startTrackingTask(PreciseCompletionTracker.TASK_COLLECT, future);
+                CompletableFuture.runAsync(() -> {
+                    try {
+                        mineProcess.mineByName(targets.toArray(new String[0]));
+                    } catch (Exception e) {
+                        future.completeExceptionally(e);
+                    }
+                });
+                break;
+            }
+            default:
+                future.completeExceptionally(new RuntimeException("Unknown COLLECT mode: " + mode));
+                break;
+        }
     }
     
     private void executeCraftCommand(CompletableFuture<Void> future) {
