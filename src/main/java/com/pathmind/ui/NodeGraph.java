@@ -458,7 +458,7 @@ public class NodeGraph {
                             continue;
                         }
                         int slotIndex = node.getParameterSlotIndexAt(worldMouseX, worldMouseY);
-                        if (slotIndex >= 0 && node.canAcceptParameterAt(slotIndex)) {
+                        if (slotIndex >= 0 && node.canAcceptParameterNode(draggingNode, slotIndex)) {
                             parameterDropTarget = node;
                             parameterDropSlotIndex = slotIndex;
                             hideSockets = true;
@@ -540,12 +540,13 @@ public class NodeGraph {
                 }
             }
         } else if (Node.isParameterType(nodeType)) {
+            Node parameterCandidate = new Node(nodeType, worldMouseX, worldMouseY);
             for (Node node : nodes) {
                 if (!node.canAcceptParameter()) {
                     continue;
                 }
                 int slotIndex = node.getParameterSlotIndexAt(worldMouseX, worldMouseY);
-                if (slotIndex >= 0 && node.canAcceptParameterAt(slotIndex)) {
+                if (slotIndex >= 0 && node.canAcceptParameterNode(parameterCandidate, slotIndex)) {
                     parameterDropTarget = node;
                     parameterDropSlotIndex = slotIndex;
                     break;
@@ -594,7 +595,7 @@ public class NodeGraph {
                     continue;
                 }
                 int slotIndex = node.getParameterSlotIndexAt(worldMouseX, worldMouseY);
-                if (slotIndex >= 0 && node.canAcceptParameterAt(slotIndex)) {
+                if (slotIndex >= 0 && node.canAcceptParameterNode(newNode, slotIndex)) {
                     nodes.add(newNode);
                     node.attachParameter(newNode, slotIndex);
                     workspaceDirty = true;

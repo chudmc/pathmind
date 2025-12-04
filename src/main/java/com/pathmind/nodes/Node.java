@@ -432,6 +432,16 @@ public class Node {
         return slotIndex >= 0 && slotIndex < getParameterSlotCount();
     }
 
+    public boolean canAcceptParameterNode(Node parameterNode, int slotIndex) {
+        if (parameterNode == null || !parameterNode.isParameterNode()) {
+            return false;
+        }
+        if (!canAcceptParameterAt(slotIndex)) {
+            return false;
+        }
+        return isParameterSupported(parameterNode, slotIndex);
+    }
+
     private boolean isParameterSlotRequired(int slotIndex) {
         if (!canAcceptParameterAt(slotIndex)) {
             return false;
@@ -447,6 +457,9 @@ public class Node {
             Node blockParameter = getAttachedParameter(0);
             return blockParameter == null || !parameterProvidesCoordinates(blockParameter);
         }
+        if (type == NodeType.PLACE_HAND) {
+            return false;
+        }
         return slotIndex == 0;
     }
 
@@ -454,7 +467,7 @@ public class Node {
         if (parameter == null) {
             return false;
         }
-        if (type != NodeType.PLACE) {
+        if (type != NodeType.PLACE && type != NodeType.PLACE_HAND) {
             return true;
         }
         NodeType parameterType = parameter.getType();
@@ -469,6 +482,16 @@ public class Node {
             }
         }
         return slotIndex == 1 ? parameterProvidesCoordinates(parameterType) : true;
+    }
+
+    private boolean isParameterSupported(Node parameter, int slotIndex) {
+        if (parameter == null) {
+            return false;
+        }
+        if (!isParameterCompatibleWithSlot(parameter, slotIndex)) {
+            return false;
+        }
+        return canApplyParameterValues(parameter) || canHandleParameterRuntime(parameter, slotIndex);
     }
 
     public boolean canAcceptActionNode() {
@@ -704,7 +727,7 @@ public class Node {
         if (!hasParameterSlot()) {
             return 0;
         }
-        if (type == NodeType.PLACE) {
+        if (type == NodeType.PLACE || type == NodeType.PLACE_HAND) {
             return 2;
         }
         return 1;
@@ -728,7 +751,7 @@ public class Node {
     }
 
     public String getParameterSlotLabel(int slotIndex) {
-        if (type == NodeType.PLACE) {
+        if (type == NodeType.PLACE || type == NodeType.PLACE_HAND) {
             return slotIndex == 0 ? "Block" : "Position";
         }
         return "Parameter";
@@ -1008,7 +1031,7 @@ public class Node {
             return true;
         }
 
-        if (!isParameterCompatibleWithSlot(parameter, slotIndex)) {
+        if (!isParameterSupported(parameter, slotIndex)) {
             sendIncompatibleParameterMessage(parameter);
             return false;
         }
@@ -1038,12 +1061,6 @@ public class Node {
         recalculateDimensions();
         updateAttachedParameterPositions();
         updateParentControlLayout();
-
-        boolean handledAtRuntime = canApplyParameterValues(parameter) || canHandleParameterRuntime(parameter);
-        if (!handledAtRuntime) {
-            net.minecraft.client.MinecraftClient client = net.minecraft.client.MinecraftClient.getInstance();
-            sendNodeErrorMessage(client, "Parameter \"" + parameter.getType().getDisplayName() + "\" cannot configure \"" + this.type.getDisplayName() + "\" and will be ignored.");
-        }
 
         return true;
     }
@@ -1192,8 +1209,71 @@ public class Node {
         }
     }
 
-    private boolean canHandleParameterRuntime(Node parameter) {
-        return parameter != null && parameter.isParameterNode();
+    private boolean canHandleParameterRuntime(Node parameter, int slotIndex) {
+        if (parameter == null || !parameter.isParameterNode()) {
+            return false;
+        }
+        EnumSet<ParameterUsage> usages = getSupportedParameterUsages(slotIndex);
+        if (usages.isEmpty()) {
+            return false;
+        }
+        NodeType parameterType = parameter.getType();
+        for (ParameterUsage usage : usages) {
+            if (parameterSupportsUsage(parameterType, usage)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private EnumSet<ParameterUsage> getSupportedParameterUsages(int slotIndex) {
+        if (!canAcceptParameterAt(slotIndex)) {
+            return EnumSet.noneOf(ParameterUsage.class);
+        }
+        switch (type) {
+            case GOTO:
+            case GOAL:
+            case BUILD:
+            case EXPLORE:
+            case FOLLOW:
+            case PATH:
+            case INTERACT:
+                return EnumSet.of(ParameterUsage.POSITION);
+            case LOOK:
+                return EnumSet.of(ParameterUsage.LOOK_ORIENTATION, ParameterUsage.POSITION);
+            case TURN:
+                return EnumSet.of(ParameterUsage.TURN_OFFSET, ParameterUsage.POSITION);
+            case ATTACK:
+                return EnumSet.of(ParameterUsage.LOOK_ORIENTATION, ParameterUsage.POSITION);
+            case PLACE:
+                if (slotIndex == 0 || slotIndex == 1) {
+                    return EnumSet.of(ParameterUsage.POSITION);
+                }
+                break;
+            case PLACE_HAND:
+                if (slotIndex == 0 || slotIndex == 1) {
+                    return EnumSet.of(ParameterUsage.POSITION);
+                }
+                break;
+            default:
+                break;
+        }
+        return EnumSet.noneOf(ParameterUsage.class);
+    }
+
+    private boolean parameterSupportsUsage(NodeType parameterType, ParameterUsage usage) {
+        if (parameterType == null || usage == null) {
+            return false;
+        }
+        switch (usage) {
+            case POSITION:
+                return parameterProvidesCoordinates(parameterType);
+            case LOOK_ORIENTATION:
+            case TURN_OFFSET:
+                return parameterType == NodeType.PARAM_ROTATION || parameterProvidesCoordinates(parameterType);
+            default:
+                return false;
+        }
     }
 
     public boolean canAcceptActionNode(Node node) {
@@ -1521,17 +1601,25 @@ public class Node {
             case SENSOR_AT_COORDINATES:
             case SENSOR_BLOCK_AHEAD:
             case SENSOR_BLOCK_BELOW:
-            case SENSOR_LIGHT_LEVEL_BELOW:
             case SENSOR_IS_DAYTIME:
             case SENSOR_IS_RAINING:
-            case SENSOR_HEALTH_BELOW:
-            case SENSOR_HUNGER_BELOW:
             case SENSOR_ENTITY_NEARBY:
             case SENSOR_ITEM_IN_INVENTORY:
             case SENSOR_IS_SWIMMING:
             case SENSOR_IS_IN_LAVA:
             case SENSOR_IS_UNDERWATER:
+                break;
+            case SENSOR_LIGHT_LEVEL_BELOW:
+                parameters.add(new NodeParameter("Threshold", ParameterType.INTEGER, "7"));
+                break;
+            case SENSOR_HEALTH_BELOW:
+                parameters.add(new NodeParameter("Amount", ParameterType.DOUBLE, "10.0"));
+                break;
+            case SENSOR_HUNGER_BELOW:
+                parameters.add(new NodeParameter("Amount", ParameterType.INTEGER, "10"));
+                break;
             case SENSOR_IS_FALLING:
+                parameters.add(new NodeParameter("Distance", ParameterType.DOUBLE, "2.0"));
                 break;
             case SENSOR_IS_RENDERED:
                 parameters.add(new NodeParameter("Resource", ParameterType.STRING, "minecraft:stone"));
@@ -1601,18 +1689,6 @@ public class Node {
             case PARAM_CLOSEST:
                 parameters.add(new NodeParameter("Range", ParameterType.INTEGER, "5"));
                 parameters.add(new NodeParameter("RequireSolidGround", ParameterType.BOOLEAN, "true"));
-                break;
-            case PARAM_LIGHT_THRESHOLD:
-                parameters.add(new NodeParameter("Threshold", ParameterType.INTEGER, "7"));
-                break;
-            case PARAM_HEALTH_THRESHOLD:
-                parameters.add(new NodeParameter("Amount", ParameterType.DOUBLE, "10.0"));
-                break;
-            case PARAM_HUNGER_THRESHOLD:
-                parameters.add(new NodeParameter("Amount", ParameterType.INTEGER, "10"));
-                break;
-            case PARAM_FALL_DISTANCE:
-                parameters.add(new NodeParameter("Distance", ParameterType.DOUBLE, "2.0"));
                 break;
             default:
                 // No parameters needed
@@ -2513,7 +2589,9 @@ public class Node {
         if (client == null) {
             return;
         }
-        if (parameterNode != null && this.type == NodeType.PLACE && parameterNode.getType() == NodeType.PARAM_CLOSEST) {
+        if (parameterNode != null
+            && (this.type == NodeType.PLACE || this.type == NodeType.PLACE_HAND)
+            && parameterNode.getType() == NodeType.PARAM_CLOSEST) {
             return;
         }
         sendNodeErrorMessage(client, "Parameter \"" + parameterNode.getType().getDisplayName() + "\" cannot be used with \"" + this.type.getDisplayName() + "\".");
@@ -4282,6 +4360,61 @@ public class Node {
                 return false;
         }
     }
+
+    private boolean blockParameterProvidesPlacementCoordinates(Node parameterNode) {
+        return parameterNode != null && parameterNode.getType() == NodeType.PARAM_PLACE_TARGET;
+    }
+
+    private String resolveBlockIdFromParameterNode(Node parameterNode) {
+        if (parameterNode == null) {
+            return null;
+        }
+        NodeType parameterType = parameterNode.getType();
+        switch (parameterType) {
+            case PARAM_BLOCK:
+            case PARAM_PLACE_TARGET:
+                return getParameterString(parameterNode, "Block");
+            case PARAM_BLOCK_LIST: {
+                String blocks = getParameterString(parameterNode, "Blocks");
+                if (blocks == null || blocks.isEmpty()) {
+                    return null;
+                }
+                String[] entries = blocks.split(",");
+                for (String entry : entries) {
+                    String trimmed = entry.trim();
+                    if (!trimmed.isEmpty()) {
+                        return trimmed;
+                    }
+                }
+                return null;
+            }
+            default:
+                return null;
+        }
+    }
+
+    private String normalizePlacementBlockId(String blockId) {
+        if (blockId == null) {
+            return null;
+        }
+        String sanitized = sanitizeResourceId(blockId);
+        if (sanitized == null || sanitized.isEmpty()) {
+            return "";
+        }
+        return normalizeResourceId(sanitized, "minecraft");
+    }
+
+    private String getBlockIdFromHand(net.minecraft.client.MinecraftClient client, Hand hand) {
+        if (client == null || client.player == null) {
+            return null;
+        }
+        ItemStack stack = client.player.getStackInHand(hand);
+        if (stack.isEmpty() || !(stack.getItem() instanceof BlockItem)) {
+            return null;
+        }
+        Identifier id = Registries.ITEM.getId(stack.getItem());
+        return id != null ? id.toString() : null;
+    }
     
     private void executeBuildCommand(CompletableFuture<Void> future) {
         if (preprocessAttachedParameter(EnumSet.of(ParameterUsage.POSITION), future) == ParameterHandlingResult.COMPLETE) {
@@ -5152,11 +5285,34 @@ public class Node {
     }
 
     private void executePlaceHandCommand(CompletableFuture<Void> future) {
-        if (preprocessAttachedParameter(EnumSet.noneOf(ParameterUsage.class), future) == ParameterHandlingResult.COMPLETE) {
-            return;
+        Node blockParameterNode = getAttachedParameter(0);
+        Node coordinateParameterNode = getAttachedParameter(1);
+        boolean blockProvidesCoordinates = blockParameterProvidesPlacementCoordinates(blockParameterNode);
+        boolean coordinateProvidesCoordinates = parameterProvidesCoordinates(coordinateParameterNode);
+        boolean coordinateHandledByBlockParam = coordinateParameterNode == null && blockProvidesCoordinates;
+
+        if (blockParameterNode != null) {
+            EnumSet<ParameterUsage> blockUsages = coordinateHandledByBlockParam
+                ? EnumSet.of(ParameterUsage.POSITION)
+                : EnumSet.noneOf(ParameterUsage.class);
+            if (preprocessParameterSlot(0, blockUsages, future, true) == ParameterHandlingResult.COMPLETE) {
+                return;
+            }
+        } else {
+            runtimeParameterData = null;
         }
+
+        if (coordinateParameterNode != null) {
+            EnumSet<ParameterUsage> coordinateUsages = coordinateProvidesCoordinates
+                ? EnumSet.of(ParameterUsage.POSITION)
+                : EnumSet.noneOf(ParameterUsage.class);
+            if (preprocessParameterSlot(1, coordinateUsages, future, blockParameterNode == null) == ParameterHandlingResult.COMPLETE) {
+                return;
+            }
+        }
+
         net.minecraft.client.MinecraftClient client = net.minecraft.client.MinecraftClient.getInstance();
-        if (client == null || client.player == null || client.interactionManager == null) {
+        if (client == null || client.player == null || client.interactionManager == null || client.world == null) {
             future.completeExceptionally(new RuntimeException("Minecraft client not available"));
             return;
         }
@@ -5166,6 +5322,40 @@ public class Node {
         boolean restoreSneak = getBooleanParameter("RestoreSneakState", true);
         boolean swingOnPlace = getBooleanParameter("SwingOnPlace", true);
         boolean requireBlockHit = getBooleanParameter("RequireBlockHit", true);
+
+        RuntimeParameterData parameterData = runtimeParameterData;
+        BlockPos directedPlacementPos = null;
+        if (parameterData != null && (coordinateProvidesCoordinates || coordinateHandledByBlockParam)) {
+            directedPlacementPos = parameterData.targetBlockPos;
+        }
+
+        String parameterBlockId = resolveBlockIdFromParameterNode(blockParameterNode);
+        if ((parameterBlockId == null || parameterBlockId.isEmpty()) && parameterData != null) {
+            if (parameterData.targetBlockId != null && !parameterData.targetBlockId.isEmpty()) {
+                parameterBlockId = parameterData.targetBlockId;
+            } else if (parameterData.targetBlockIds != null && !parameterData.targetBlockIds.isEmpty()) {
+                parameterBlockId = parameterData.targetBlockIds.get(0);
+            }
+        }
+        parameterBlockId = normalizePlacementBlockId(parameterBlockId);
+        if (parameterBlockId != null && parameterBlockId.isEmpty()) {
+            parameterBlockId = null;
+        }
+
+        if (directedPlacementPos != null) {
+            handleDirectedPlaceHandPlacement(client, hand, parameterBlockId, directedPlacementPos, sneakWhilePlacing, restoreSneak, swingOnPlace, future);
+            return;
+        }
+
+        if (parameterBlockId != null && !parameterBlockId.isEmpty()) {
+            try {
+                ensureBlockInHand(client, parameterBlockId, hand);
+            } catch (PlacementFailure e) {
+                sendNodeErrorMessage(client, e.getMessage());
+                future.complete(null);
+                return;
+            }
+        }
 
         boolean previousSneak = client.player.isSneaking();
         if (sneakWhilePlacing) {
@@ -5204,6 +5394,101 @@ public class Node {
         }
 
         future.complete(null);
+    }
+
+    private void handleDirectedPlaceHandPlacement(
+        net.minecraft.client.MinecraftClient client,
+        Hand hand,
+        String parameterBlockId,
+        BlockPos targetPos,
+        boolean sneakWhilePlacing,
+        boolean restoreSneak,
+        boolean swingOnPlace,
+        CompletableFuture<Void> future
+    ) {
+        if (client == null || client.player == null || client.world == null || client.interactionManager == null) {
+            future.completeExceptionally(new RuntimeException("Minecraft client not available"));
+            return;
+        }
+
+        String blockIdToUse = parameterBlockId;
+        if (blockIdToUse == null || blockIdToUse.isEmpty()) {
+            blockIdToUse = getBlockIdFromHand(client, hand);
+        }
+        if (blockIdToUse == null || blockIdToUse.isEmpty()) {
+            sendNodeErrorMessage(client, "Cannot place block: no block selected.");
+            future.complete(null);
+            return;
+        }
+
+        Block desiredBlock = resolveBlockForPlacement(blockIdToUse);
+        if (desiredBlock == null) {
+            sendNodeErrorMessage(client, "Cannot place block: unknown block \"" + blockIdToUse + "\".");
+            future.complete(null);
+            return;
+        }
+
+        double reachSquared = getPlacementReachSquared(client);
+        final BlockPos placementPos = targetPos;
+        final Block resolvedBlock = desiredBlock;
+        final String resolvedBlockId = blockIdToUse;
+        final Hand resolvedHand = hand;
+        final boolean shouldSwing = swingOnPlace;
+        final boolean shouldSneak = sneakWhilePlacing;
+        final boolean shouldRestoreSneak = restoreSneak;
+
+        new Thread(() -> {
+            try {
+                BlockHitResult placementHitResult = supplyFromClient(client, () ->
+                    preparePlacementHitResult(client, placementPos, resolvedBlockId, resolvedHand, reachSquared)
+                );
+                runOnClientThread(client, () -> {
+                    boolean initialSneak = client.player.isSneaking();
+                    if (shouldSneak) {
+                        client.player.setSneaking(true);
+                        if (client.options != null && client.options.sneakKey != null) {
+                            client.options.sneakKey.setPressed(true);
+                        }
+                    }
+                    try {
+                        if (client.world.getBlockState(placementPos).isOf(resolvedBlock)) {
+                            return;
+                        }
+                        ActionResult result = client.interactionManager.interactBlock(client.player, resolvedHand, placementHitResult);
+                        if (!result.isAccepted()) {
+                            throw new PlacementFailure("Cannot place block at " + formatBlockPos(placementPos) + ": placement rejected (" + result + ").");
+                        }
+                        if (shouldSwing) {
+                            client.player.swingHand(resolvedHand);
+                            if (client.player.networkHandler != null) {
+                                client.player.networkHandler.sendPacket(new HandSwingC2SPacket(resolvedHand));
+                            }
+                        }
+                    } finally {
+                        if (shouldSneak && shouldRestoreSneak) {
+                            client.player.setSneaking(initialSneak);
+                            if (client.options != null && client.options.sneakKey != null) {
+                                client.options.sneakKey.setPressed(initialSneak);
+                            }
+                        }
+                    }
+                });
+                boolean placed = waitForBlockPlacement(client, placementPos, resolvedBlock);
+                if (!placed) {
+                    sendNodeErrorMessage(client, "Attempted to place block \"" + resolvedBlockId + "\" at " + formatBlockPos(placementPos) + " but it did not appear. Make sure the space is clear and within reach.");
+                }
+                future.complete(null);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                future.completeExceptionally(e);
+            } catch (PlacementFailure e) {
+                sendNodeErrorMessage(client, e.getMessage());
+                future.complete(null);
+            } catch (RuntimeException e) {
+                sendNodeErrorMessage(client, "Failed to place block \"" + resolvedBlockId + "\": " + e.getMessage());
+                future.complete(null);
+            }
+        }, "Pathmind-PlaceHand").start();
     }
 
     private void ensureBlockInHand(net.minecraft.client.MinecraftClient client, String blockId, Hand hand) {
@@ -6407,10 +6692,6 @@ public class Node {
             }
             case SENSOR_LIGHT_LEVEL_BELOW: {
                 int threshold = MathHelper.clamp(getIntParameter("Threshold", 7), 0, 15);
-                Node parameterNode = getAttachedParameterOfType(NodeType.PARAM_LIGHT_THRESHOLD);
-                if (parameterNode != null) {
-                    threshold = MathHelper.clamp(parseNodeInt(parameterNode, "Threshold", threshold), 0, 15);
-                }
                 result = isLightLevelBelow(threshold);
                 break;
             }
@@ -6422,19 +6703,11 @@ public class Node {
                 break;
             case SENSOR_HEALTH_BELOW: {
                 double amount = MathHelper.clamp(getDoubleParameter("Amount", 10.0), 0.0, 40.0);
-                Node parameterNode = getAttachedParameterOfType(NodeType.PARAM_HEALTH_THRESHOLD);
-                if (parameterNode != null) {
-                    amount = MathHelper.clamp(parseNodeDouble(parameterNode, "Amount", amount), 0.0, 40.0);
-                }
                 result = isHealthBelow(amount);
                 break;
             }
             case SENSOR_HUNGER_BELOW: {
                 int amount = MathHelper.clamp(getIntParameter("Amount", 10), 0, 20);
-                Node parameterNode = getAttachedParameterOfType(NodeType.PARAM_HUNGER_THRESHOLD);
-                if (parameterNode != null) {
-                    amount = MathHelper.clamp(parseNodeInt(parameterNode, "Amount", amount), 0, 20);
-                }
                 result = isHungerBelow(amount);
                 break;
             }
@@ -6475,10 +6748,6 @@ public class Node {
                 break;
             case SENSOR_IS_FALLING: {
                 double distance = Math.max(0.0, getDoubleParameter("Distance", 2.0));
-                Node parameterNode = getAttachedParameterOfType(NodeType.PARAM_FALL_DISTANCE);
-                if (parameterNode != null) {
-                    distance = Math.max(0.0, parseNodeDouble(parameterNode, "Distance", distance));
-                }
                 result = isFalling(distance);
                 break;
             }
