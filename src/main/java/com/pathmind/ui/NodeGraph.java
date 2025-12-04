@@ -16,8 +16,12 @@ import net.minecraft.client.font.TextRenderer;
 import net.minecraft.text.Text;
 
 import java.nio.file.Path;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
+import java.util.Deque;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -34,6 +38,8 @@ public class NodeGraph {
     private static final int CONNECTION_DOT_SPACING = 12;
     private static final int CONNECTION_DOT_LENGTH = 4;
     private static final int CONNECTION_ANIMATION_STEP_MS = 50;
+    private static final int DUPLICATE_OFFSET_X = 32;
+    private static final int DUPLICATE_OFFSET_Y = 24;
 
     private final List<Node> nodes;
     private final List<NodeConnection> connections;
@@ -42,6 +48,8 @@ public class NodeGraph {
     private int draggingNodeStartX;
     private int draggingNodeStartY;
     private boolean draggingNodeDetached;
+    private NodeGraphData pendingDragUndoSnapshot = null;
+    private boolean dragOperationChanged = false;
     
     // Camera/viewport for infinite scrolling
     private int cameraX = 0;
@@ -101,6 +109,111 @@ public class NodeGraph {
     private long amountCaretLastToggleTime = 0L;
     private boolean amountCaretVisible = true;
     private boolean workspaceDirty = false;
+    private ZoomLevel zoomLevel = ZoomLevel.FOCUSED;
+    private ClipboardSnapshot clipboardNodeSnapshot = null;
+    private final Deque<NodeGraphData> undoStack = new ArrayDeque<>();
+    private final Deque<NodeGraphData> redoStack = new ArrayDeque<>();
+    private boolean suppressUndoCapture = false;
+    private static final int MAX_HISTORY = 50;
+
+    public enum ZoomLevel {
+        FOCUSED(1.0f, true),
+        OVERVIEW(0.35f, false),
+        DISTANT(0.18f, false);
+
+        private final float scale;
+        private final boolean showText;
+
+        ZoomLevel(float scale, boolean showText) {
+            this.scale = scale;
+            this.showText = showText;
+        }
+
+        public float getScale() {
+            return scale;
+        }
+
+        public boolean shouldShowText() {
+            return showText;
+        }
+    }
+
+    private static final class ClipboardSnapshot {
+        private final NodeGraphData data;
+        private final String rootNodeId;
+        private final int rootOriginX;
+        private final int rootOriginY;
+
+        private ClipboardSnapshot(NodeGraphData data, String rootNodeId, int rootOriginX, int rootOriginY) {
+            this.data = data;
+            this.rootNodeId = rootNodeId;
+            this.rootOriginX = rootOriginX;
+            this.rootOriginY = rootOriginY;
+        }
+    }
+
+    public ZoomLevel getZoomLevel() {
+        return zoomLevel;
+    }
+
+    public boolean isZoomedOut() {
+        return zoomLevel != ZoomLevel.FOCUSED;
+    }
+
+    public void setZoomLevel(ZoomLevel newLevel, int anchorScreenX, int anchorScreenY) {
+        if (newLevel == null || newLevel == this.zoomLevel) {
+            return;
+        }
+        int anchorWorldX = screenToWorldX(anchorScreenX);
+        int anchorWorldY = screenToWorldY(anchorScreenY);
+        this.zoomLevel = newLevel;
+        alignCameraToAnchor(anchorWorldX, anchorWorldY, anchorScreenX, anchorScreenY);
+    }
+
+    private void alignCameraToAnchor(int anchorWorldX, int anchorWorldY, int anchorScreenX, int anchorScreenY) {
+        float scale = getZoomScale();
+        if (scale == 0.0f) {
+            scale = 1.0f;
+        }
+        cameraX = Math.round(anchorWorldX - anchorScreenX / scale);
+        cameraY = Math.round(anchorWorldY - anchorScreenY / scale);
+    }
+
+    private float getZoomScale() {
+        return zoomLevel.getScale();
+    }
+
+    private boolean shouldRenderNodeText() {
+        return zoomLevel.shouldShowText();
+    }
+
+    public boolean canZoomIn() {
+        return zoomLevel.ordinal() > 0;
+    }
+
+    public boolean canZoomOut() {
+        return zoomLevel.ordinal() < ZoomLevel.values().length - 1;
+    }
+
+    public void zoomIn(int anchorScreenX, int anchorScreenY) {
+        if (!canZoomIn()) {
+            return;
+        }
+        ZoomLevel target = ZoomLevel.values()[zoomLevel.ordinal() - 1];
+        setZoomLevel(target, anchorScreenX, anchorScreenY);
+    }
+
+    public void zoomOut(int anchorScreenX, int anchorScreenY) {
+        if (!canZoomOut()) {
+            return;
+        }
+        ZoomLevel target = ZoomLevel.values()[zoomLevel.ordinal() + 1];
+        setZoomLevel(target, anchorScreenX, anchorScreenY);
+    }
+
+    public boolean isDefaultZoom() {
+        return zoomLevel == ZoomLevel.FOCUSED;
+    }
 
     public NodeGraph() {
         this.nodes = new ArrayList<>();
@@ -149,7 +262,12 @@ public class NodeGraph {
     }
 
     public void removeNode(Node node) {
+        if (node == null) {
+            return;
+        }
+        pushUndoState();
         removeNodeInternal(node, true, true);
+        workspaceDirty = true;
     }
 
     private void removeNodeInternal(Node node, boolean autoReconnect, boolean repositionDetachments) {
@@ -265,8 +383,8 @@ public class NodeGraph {
 
     public Node getNodeAt(int x, int y) {
         // Convert screen coordinates to world coordinates
-        int worldX = x + cameraX;
-        int worldY = y + cameraY;
+        int worldX = screenToWorldX(x);
+        int worldY = screenToWorldY(y);
 
         for (Node node : nodes) {
             if (node.isSensorNode() && node.containsPoint(worldX, worldY)) {
@@ -371,18 +489,333 @@ public class NodeGraph {
         return selectedNode;
     }
 
+    public boolean copySelectedNodeToClipboard() {
+        ClipboardSnapshot snapshot = createClipboardSnapshot(selectedNode);
+        if (snapshot == null) {
+            return false;
+        }
+        clipboardNodeSnapshot = snapshot;
+        return true;
+    }
+
+    public Node duplicateSelectedNode() {
+        if (selectedNode == null) {
+            return null;
+        }
+        ClipboardSnapshot snapshot = createClipboardSnapshot(selectedNode);
+        if (snapshot == null) {
+            return null;
+        }
+        clipboardNodeSnapshot = snapshot;
+        pushUndoState();
+        return instantiateClipboardSnapshot(snapshot, selectedNode.getX() + DUPLICATE_OFFSET_X, selectedNode.getY() + DUPLICATE_OFFSET_Y);
+    }
+
+    public Node pasteClipboardNode() {
+        if (clipboardNodeSnapshot == null) {
+            return null;
+        }
+        int baseX = selectedNode != null ? selectedNode.getX() : clipboardNodeSnapshot.rootOriginX;
+        int baseY = selectedNode != null ? selectedNode.getY() : clipboardNodeSnapshot.rootOriginY;
+        pushUndoState();
+        return instantiateClipboardSnapshot(clipboardNodeSnapshot, baseX + DUPLICATE_OFFSET_X, baseY + DUPLICATE_OFFSET_Y);
+    }
+
+    public boolean deleteSelectedNode() {
+        if (selectedNode == null) {
+            return false;
+        }
+        removeNode(selectedNode);
+        return true;
+    }
+
+    private ClipboardSnapshot createClipboardSnapshot(Node node) {
+        if (node == null) {
+            return null;
+        }
+        List<Node> hierarchy = new ArrayList<>();
+        collectHierarchy(node, hierarchy, new HashSet<>());
+        if (hierarchy.isEmpty()) {
+            return null;
+        }
+        Set<Node> subset = new LinkedHashSet<>(hierarchy);
+        List<NodeConnection> subsetConnections = new ArrayList<>();
+        for (NodeConnection connection : connections) {
+            if (subset.contains(connection.getOutputNode()) && subset.contains(connection.getInputNode())) {
+                subsetConnections.add(connection);
+            }
+        }
+        NodeGraphData data = buildGraphData(hierarchy, subsetConnections, subset);
+        if (data == null) {
+            return null;
+        }
+        return new ClipboardSnapshot(data, node.getId(), node.getX(), node.getY());
+    }
+
+    private Node instantiateClipboardSnapshot(ClipboardSnapshot snapshot, int targetRootX, int targetRootY) {
+        if (snapshot == null || snapshot.data == null) {
+            return null;
+        }
+        int offsetX = targetRootX - snapshot.rootOriginX;
+        int offsetY = targetRootY - snapshot.rootOriginY;
+        Map<String, Node> idToNode = new HashMap<>();
+
+        for (NodeGraphData.NodeData nodeData : snapshot.data.getNodes()) {
+            if (nodeData.getType() == null) {
+                continue;
+            }
+            Node newNode = new Node(nodeData.getType(), nodeData.getX() + offsetX, nodeData.getY() + offsetY);
+            if (nodeData.getMode() != null) {
+                newNode.setMode(nodeData.getMode());
+            }
+            List<NodeGraphData.ParameterData> params = nodeData.getParameters();
+            if (params != null) {
+                newNode.getParameters().clear();
+                for (NodeGraphData.ParameterData paramData : params) {
+                    ParameterType parameterType = ParameterType.STRING;
+                    String typeName = paramData.getType();
+                    if (typeName != null) {
+                        try {
+                            parameterType = ParameterType.valueOf(typeName);
+                        } catch (IllegalArgumentException ignored) {
+                            parameterType = ParameterType.STRING;
+                        }
+                    }
+                    String value = paramData.getValue() == null ? "" : paramData.getValue();
+                    NodeParameter parameter = new NodeParameter(paramData.getName(), parameterType, value);
+                    newNode.getParameters().add(parameter);
+                }
+                newNode.recalculateDimensions();
+            }
+            nodes.add(newNode);
+            idToNode.put(nodeData.getId(), newNode);
+        }
+
+        for (NodeGraphData.NodeData nodeData : snapshot.data.getNodes()) {
+            Node parent = idToNode.get(nodeData.getId());
+            if (parent == null) {
+                continue;
+            }
+            String sensorId = nodeData.getAttachedSensorId();
+            if (sensorId != null) {
+                Node sensor = idToNode.get(sensorId);
+                if (sensor != null) {
+                    parent.attachSensor(sensor);
+                }
+            }
+            String actionId = nodeData.getAttachedActionId();
+            if (actionId != null) {
+                Node action = idToNode.get(actionId);
+                if (action != null) {
+                    parent.attachActionNode(action);
+                }
+            }
+
+            List<NodeGraphData.ParameterAttachmentData> attachments = nodeData.getParameterAttachments();
+            if (attachments != null && !attachments.isEmpty()) {
+                List<NodeGraphData.ParameterAttachmentData> ordered = new ArrayList<>(attachments);
+                ordered.sort(java.util.Comparator.comparingInt(NodeGraphData.ParameterAttachmentData::getSlotIndex));
+                for (NodeGraphData.ParameterAttachmentData attachment : ordered) {
+                    Node parameterNode = idToNode.get(attachment.getParameterNodeId());
+                    if (parameterNode != null) {
+                        parent.attachParameter(parameterNode, attachment.getSlotIndex());
+                    }
+                }
+            }
+        }
+
+        if (snapshot.data.getConnections() != null) {
+            for (NodeGraphData.ConnectionData connData : snapshot.data.getConnections()) {
+                Node outputNode = idToNode.get(connData.getOutputNodeId());
+                Node inputNode = idToNode.get(connData.getInputNodeId());
+                if (outputNode == null || inputNode == null || outputNode.isSensorNode() || inputNode.isSensorNode()) {
+                    continue;
+                }
+                connections.add(new NodeConnection(outputNode, inputNode, connData.getOutputSocket(), connData.getInputSocket()));
+            }
+        }
+
+        Node rootClone = idToNode.get(snapshot.rootNodeId);
+        if (rootClone != null) {
+            selectNode(rootClone);
+            bringNodeToFront(rootClone);
+        }
+        workspaceDirty = true;
+        return rootClone;
+    }
+
+    private NodeGraphData buildGraphData(Collection<Node> nodeCollection, Collection<NodeConnection> connectionCollection, Set<Node> allowedNodes) {
+        NodeGraphData data = new NodeGraphData();
+        if (nodeCollection == null) {
+            return data;
+        }
+        Set<Node> allowed = allowedNodes != null ? allowedNodes : new LinkedHashSet<>(nodeCollection);
+        for (Node node : nodeCollection) {
+            if (node == null) {
+                continue;
+            }
+            NodeGraphData.NodeData nodeData = new NodeGraphData.NodeData();
+            nodeData.setId(node.getId());
+            nodeData.setType(node.getType());
+            nodeData.setMode(node.getMode());
+            nodeData.setX(node.getX());
+            nodeData.setY(node.getY());
+
+            List<NodeGraphData.ParameterData> paramDataList = new ArrayList<>();
+            for (NodeParameter param : node.getParameters()) {
+                NodeGraphData.ParameterData paramData = new NodeGraphData.ParameterData();
+                paramData.setName(param.getName());
+                paramData.setValue(param.getStringValue());
+                paramData.setType(param.getType().name());
+                paramDataList.add(paramData);
+            }
+            nodeData.setParameters(paramDataList);
+
+            Node attachedSensor = node.getAttachedSensor();
+            nodeData.setAttachedSensorId(attachedSensor != null && allowed.contains(attachedSensor) ? attachedSensor.getId() : null);
+
+            Node parentControl = node.getParentControl();
+            nodeData.setParentControlId(parentControl != null && allowed.contains(parentControl) ? parentControl.getId() : null);
+
+            Node attachedAction = node.getAttachedActionNode();
+            nodeData.setAttachedActionId(attachedAction != null && allowed.contains(attachedAction) ? attachedAction.getId() : null);
+
+            Node parentActionControl = node.getParentActionControl();
+            nodeData.setParentActionControlId(parentActionControl != null && allowed.contains(parentActionControl) ? parentActionControl.getId() : null);
+
+            List<NodeGraphData.ParameterAttachmentData> attachmentData = new ArrayList<>();
+            Map<Integer, Node> attachedParameters = node.getAttachedParameters();
+            if (attachedParameters != null && !attachedParameters.isEmpty()) {
+                List<Integer> slotIndices = new ArrayList<>(attachedParameters.keySet());
+                Collections.sort(slotIndices);
+                for (Integer slotIndex : slotIndices) {
+                    Node parameterNode = attachedParameters.get(slotIndex);
+                    if (parameterNode != null && allowed.contains(parameterNode)) {
+                        attachmentData.add(new NodeGraphData.ParameterAttachmentData(slotIndex, parameterNode.getId()));
+                    }
+                }
+            }
+            nodeData.setParameterAttachments(attachmentData);
+            if (!attachmentData.isEmpty()) {
+                nodeData.setAttachedParameterId(attachmentData.get(0).getParameterNodeId());
+            } else {
+                nodeData.setAttachedParameterId(null);
+            }
+
+            Node parentParameterHost = node.getParentParameterHost();
+            nodeData.setParentParameterHostId(parentParameterHost != null && allowed.contains(parentParameterHost) ? parentParameterHost.getId() : null);
+
+            data.getNodes().add(nodeData);
+        }
+
+        if (connectionCollection != null) {
+            for (NodeConnection connection : connectionCollection) {
+                if (connection == null) {
+                    continue;
+                }
+                Node outputNode = connection.getOutputNode();
+                Node inputNode = connection.getInputNode();
+                if (!allowed.contains(outputNode) || !allowed.contains(inputNode)) {
+                    continue;
+                }
+                if (outputNode.isSensorNode() || inputNode.isSensorNode()) {
+                    continue;
+                }
+                NodeGraphData.ConnectionData connData = new NodeGraphData.ConnectionData(
+                    outputNode.getId(),
+                    inputNode.getId(),
+                    connection.getOutputSocket(),
+                    connection.getInputSocket()
+                );
+                data.getConnections().add(connData);
+            }
+        }
+
+        return data;
+    }
+
+    private void pushUndoState() {
+        if (suppressUndoCapture) {
+            return;
+        }
+        NodeGraphData snapshot = buildGraphData(new ArrayList<>(nodes), new ArrayList<>(connections), null);
+        pushUndoSnapshot(snapshot);
+    }
+
+    private void pushUndoSnapshot(NodeGraphData snapshot) {
+        if (snapshot == null || suppressUndoCapture) {
+            return;
+        }
+        undoStack.push(snapshot);
+        while (undoStack.size() > MAX_HISTORY) {
+            undoStack.removeLast();
+        }
+        redoStack.clear();
+    }
+
+    private void restoreFromSnapshot(NodeGraphData data) {
+        if (data == null) {
+            return;
+        }
+        suppressUndoCapture = true;
+        applyLoadedData(data);
+        suppressUndoCapture = false;
+        workspaceDirty = true;
+    }
+
+    public boolean undo() {
+        if (undoStack.isEmpty()) {
+            return false;
+        }
+        NodeGraphData currentState = buildGraphData(new ArrayList<>(nodes), new ArrayList<>(connections), null);
+        NodeGraphData previousState = undoStack.pop();
+        if (currentState != null) {
+            redoStack.push(currentState);
+        }
+        restoreFromSnapshot(previousState);
+        return true;
+    }
+
+    public boolean redo() {
+        if (redoStack.isEmpty()) {
+            return false;
+        }
+        NodeGraphData currentState = buildGraphData(new ArrayList<>(nodes), new ArrayList<>(connections), null);
+        NodeGraphData nextState = redoStack.pop();
+        if (currentState != null) {
+            undoStack.push(currentState);
+        }
+        restoreFromSnapshot(nextState);
+        return true;
+    }
+
     public void startDragging(Node node, int mouseX, int mouseY) {
         stopCoordinateEditing(true);
         stopAmountEditing(true);
         resetDropTargets();
+
+        if (node == null) {
+            pendingDragUndoSnapshot = null;
+            dragOperationChanged = false;
+            return;
+        }
+
+        if (suppressUndoCapture) {
+            pendingDragUndoSnapshot = null;
+        } else {
+            pendingDragUndoSnapshot = buildGraphData(new ArrayList<>(nodes), new ArrayList<>(connections), null);
+        }
+        dragOperationChanged = false;
 
         draggingNode = node;
         draggingNodeStartX = node.getX();
         draggingNodeStartY = node.getY();
         draggingNodeDetached = false;
         node.setDragging(true);
-        node.setDragOffsetX(mouseX + cameraX - node.getX());
-        node.setDragOffsetY(mouseY + cameraY - node.getY());
+        int worldMouseX = screenToWorldX(mouseX);
+        int worldMouseY = screenToWorldY(mouseY);
+        node.setDragOffsetX(worldMouseX - node.getX());
+        node.setDragOffsetY(worldMouseY - node.getY());
     }
     
     public void startDraggingConnection(Node node, int socketIndex, boolean isOutput, int mouseX, int mouseY) {
@@ -392,8 +825,8 @@ public class NodeGraph {
         connectionSourceNode = node;
         connectionSourceSocket = socketIndex;
         isOutputSocket = isOutput;
-        connectionDragX = mouseX + cameraX;
-        connectionDragY = mouseY + cameraY;
+        connectionDragX = screenToWorldX(mouseX);
+        connectionDragY = screenToWorldY(mouseY);
         
         // Find and disconnect existing connection from this socket
         disconnectedConnection = null;
@@ -423,8 +856,8 @@ public class NodeGraph {
     }
 
     public void updateDrag(int mouseX, int mouseY) {
-        int worldMouseX = mouseX + cameraX;
-        int worldMouseY = mouseY + cameraY;
+        int worldMouseX = screenToWorldX(mouseX);
+        int worldMouseY = screenToWorldY(mouseY);
 
         if (draggingNode != null) {
             int newX = worldMouseX - draggingNode.getDragOffsetX();
@@ -437,6 +870,11 @@ public class NodeGraph {
             }
 
             if (draggingNodeDetached) {
+                int currentX = draggingNode.getX();
+                int currentY = draggingNode.getY();
+                if (currentX != newX || currentY != newY) {
+                    dragOperationChanged = true;
+                }
                 draggingNode.setPosition(newX, newY);
 
                 boolean hideSockets = false;
@@ -649,8 +1087,8 @@ public class NodeGraph {
             return;
         }
 
-        int worldMouseX = mouseX + cameraX;
-        int worldMouseY = mouseY + cameraY;
+        int worldMouseX = screenToWorldX(mouseX);
+        int worldMouseY = screenToWorldY(mouseY);
 
         // Check for socket hover
         for (Node node : nodes) {
@@ -717,6 +1155,13 @@ public class NodeGraph {
         draggingNode = null;
         draggingNodeDetached = false;
         resetDropTargets();
+
+        if (dragOperationChanged) {
+            pushUndoSnapshot(pendingDragUndoSnapshot);
+            workspaceDirty = true;
+        }
+        pendingDragUndoSnapshot = null;
+        dragOperationChanged = false;
     }
 
     private void detachDraggingNodeFromParents() {
@@ -746,6 +1191,7 @@ public class NodeGraph {
         }
 
         draggingNodeDetached = true;
+        dragOperationChanged = true;
     }
     
     public void stopDraggingConnection() {
@@ -821,8 +1267,12 @@ public class NodeGraph {
         if (isPanning) {
             int deltaX = mouseX - panStartX;
             int deltaY = mouseY - panStartY;
-            cameraX = panStartCameraX - deltaX; // Flip horizontal panning
-            cameraY = panStartCameraY - deltaY; // Flip vertical panning
+            float scale = getZoomScale();
+            if (scale == 0.0f) {
+                scale = 1.0f;
+            }
+            cameraX = panStartCameraX - Math.round(deltaX / scale); // Flip horizontal panning
+            cameraY = panStartCameraY - Math.round(deltaY / scale); // Flip vertical panning
         }
     }
     
@@ -841,20 +1291,28 @@ public class NodeGraph {
     
     // Convert screen coordinates to world coordinates
     public int screenToWorldX(int screenX) {
-        return screenX + cameraX;
+        float scale = getZoomScale();
+        if (scale == 0.0f) {
+            scale = 1.0f;
+        }
+        return cameraX + Math.round(screenX / scale);
     }
     
     public int screenToWorldY(int screenY) {
-        return screenY + cameraY;
+        float scale = getZoomScale();
+        if (scale == 0.0f) {
+            scale = 1.0f;
+        }
+        return cameraY + Math.round(screenY / scale);
     }
     
     // Convert world coordinates to screen coordinates
     public int worldToScreenX(int worldX) {
-        return worldX - cameraX;
+        return Math.round((worldX - cameraX) * getZoomScale());
     }
     
     public int worldToScreenY(int worldY) {
-        return worldY - cameraY;
+        return Math.round((worldY - cameraY) * getZoomScale());
     }
     
     public void deleteNodeIfInSidebar(Node node, int mouseX, int sidebarWidth) {
@@ -871,12 +1329,17 @@ public class NodeGraph {
     }
 
     private void removeNodeCascade(Node node) {
+        if (node == null) {
+            return;
+        }
+        pushUndoState();
         List<Node> removalOrder = new ArrayList<>();
         collectNodesForCascade(node, removalOrder, new HashSet<>());
         for (Node toRemove : removalOrder) {
             boolean shouldReconnect = toRemove == node;
             removeNodeInternal(toRemove, shouldReconnect, false);
         }
+        workspaceDirty = true;
     }
 
     private void collectNodesForCascade(Node node, List<Node> order, Set<Node> visited) {
@@ -910,15 +1373,17 @@ public class NodeGraph {
     }
     
     public boolean isNodeOverSidebar(Node node, int sidebarWidth) {
-        // Check if node is more than halfway over the sidebar area (for deletion)
-        // Use world coordinates (without camera offset) for this check
-        return node.getX() + node.getWidth() / 2 < sidebarWidth;
+        if (node == null) {
+            return false;
+        }
+        int screenX = worldToScreenX(node.getX());
+        double scaledCenter = screenX + (node.getWidth() * getZoomScale()) / 2.0;
+        return scaledCenter < sidebarWidth;
     }
     
     public boolean isNodeOverSidebar(Node node, int sidebarWidth, int screenX, int screenWidth) {
-        // Check if node is more than halfway over the sidebar area (for deletion)
-        // Use screen coordinates (with camera offset) for this check
-        return screenX + screenWidth / 2 < sidebarWidth;
+        double scaledCenter = (screenX + screenWidth / 2.0) * getZoomScale();
+        return scaledCenter < sidebarWidth;
     }
     
     public boolean tryConnectToSocket(Node targetNode, int targetSocket, boolean isInput) {
@@ -963,7 +1428,9 @@ public class NodeGraph {
     }
 
     public void render(DrawContext context, TextRenderer textRenderer, int mouseX, int mouseY, float delta, boolean onlyDragged) {
-        boolean anyHierarchyDragging = nodes.stream().anyMatch(node -> !node.isParameterNode() && isHierarchyDragging(node));
+        var matrices = context.getMatrices();
+        matrices.pushMatrix();
+        matrices.scale(getZoomScale(), getZoomScale());
 
         if (!onlyDragged) {
             updateCascadeDeletionPreview();
@@ -982,6 +1449,7 @@ public class NodeGraph {
             renderHierarchy(root, context, textRenderer, mouseX, mouseY, delta, onlyDragged, false, renderedNodes);
         }
 
+        matrices.popMatrix();
     }
 
     private void renderHierarchy(Node node, DrawContext context, TextRenderer textRenderer, int mouseX, int mouseY, float delta, boolean onlyDragged, boolean ancestorActive, Set<Node> renderedNodes) {
@@ -1123,7 +1591,8 @@ public class NodeGraph {
             
             // Node title
             int titleColor = isOverSidebar ? 0xFF888888 : 0xFFFFFFFF; // Grey text when over sidebar
-            context.drawTextWithShadow(
+            drawNodeText(
+                context,
                 textRenderer,
                 node.getDisplayName(),
                 x + 4,
@@ -1190,7 +1659,8 @@ public class NodeGraph {
             context.fill(x + 1, y + 1, x + width - 1, y + height - 1, baseColor);
 
             int titleColor = isOverSidebar ? 0xFFE3BBCB : 0xFFFFF5F8;
-            context.drawTextWithShadow(
+            drawNodeText(
+                context,
                 textRenderer,
                 Text.literal("Function"),
                 x + 6,
@@ -1214,7 +1684,8 @@ public class NodeGraph {
             display = trimTextToWidth(display, textRenderer, boxRight - boxLeft - 8);
             int textY = boxTop + (boxHeight - textRenderer.fontHeight) / 2 + 1;
             int textColor = isOverSidebar ? 0xFFBFA1AF : 0xFFFFEEF5;
-            context.drawTextWithShadow(
+            drawNodeText(
+                context,
                 textRenderer,
                 Text.literal(display),
                 boxLeft + 4,
@@ -1226,7 +1697,8 @@ public class NodeGraph {
             context.fill(x + 1, y + 1, x + width - 1, y + height - 1, baseColor);
 
             int titleColor = isOverSidebar ? 0xFFE3BBCB : 0xFFFFF5F8;
-            context.drawTextWithShadow(
+            drawNodeText(
+                context,
                 textRenderer,
                 Text.literal("Call Function"),
                 x + 6,
@@ -1250,7 +1722,8 @@ public class NodeGraph {
             display = trimTextToWidth(display, textRenderer, boxRight - boxLeft - 8);
             int textY = boxTop + (boxHeight - textRenderer.fontHeight) / 2 + 1;
             int textColor = isOverSidebar ? 0xFFBFA1AF : 0xFFFFEEF5;
-            context.drawTextWithShadow(
+            drawNodeText(
+                context,
                 textRenderer,
                 Text.literal(display),
                 boxLeft + 4,
@@ -1270,7 +1743,8 @@ public class NodeGraph {
                     if (node.supportsModeSelection()) {
                         String modeLabel = trimTextToWidth(node.getModeDisplayLabel(), textRenderer, width - 10);
                         int paramTextColor = isOverSidebar ? 0xFF888888 : 0xFFE0E0E0; // Grey text when over sidebar
-                        context.drawTextWithShadow(
+                        drawNodeText(
+                            context,
                             textRenderer,
                             Text.literal(modeLabel),
                             x + 5,
@@ -1285,7 +1759,8 @@ public class NodeGraph {
                         displayText = trimTextToWidth(displayText, textRenderer, width - 10);
 
                         int paramTextColor = isOverSidebar ? 0xFF888888 : 0xFFE0E0E0; // Grey text when over sidebar
-                        context.drawTextWithShadow(
+                        drawNodeText(
+                            context,
                             textRenderer,
                             displayText,
                             x + 5,
@@ -1346,7 +1821,7 @@ public class NodeGraph {
             int textX = slotX + Math.max(4, (slotWidth - textWidth) / 2);
             int textY = slotY + (slotHeight - textRenderer.fontHeight) / 2;
             int textColor = sensorDropTarget == node ? 0xFF87CEEB : 0xFF888888;
-            context.drawTextWithShadow(textRenderer, Text.literal(display), textX, textY, textColor);
+            drawNodeText(context, textRenderer, Text.literal(display), textX, textY, textColor);
         }
     }
 
@@ -1377,7 +1852,7 @@ public class NodeGraph {
             int textX = slotX + Math.max(4, (slotWidth - textWidth) / 2);
             int textY = slotY + (slotHeight - textRenderer.fontHeight) / 2;
             int textColor = actionDropTarget == node ? 0xFF8BC34A : 0xFF888888;
-            context.drawTextWithShadow(textRenderer, Text.literal(display), textX, textY, textColor);
+            drawNodeText(context, textRenderer, Text.literal(display), textX, textY, textColor);
         }
     }
 
@@ -1409,7 +1884,7 @@ public class NodeGraph {
         int headerColor = isOverSidebar ? 0xFF777777 : 0xFFAAAAAA;
         int headerY = slotY - textRenderer.fontHeight - 2;
         if (headerY > node.getY() - cameraY + 14) {
-            context.drawTextWithShadow(textRenderer, Text.literal(headerText), slotX + 2, headerY, headerColor);
+            drawNodeText(context, textRenderer, Text.literal(headerText), slotX + 2, headerY, headerColor);
         }
 
         String label;
@@ -1427,7 +1902,7 @@ public class NodeGraph {
 
         int textColor = occupied ? 0xFFE0E0E0 : (isDropTarget ? 0xFF87CEEB : (isOverSidebar ? 0xFF666666 : 0xFF888888));
         int textY = slotY + slotHeight / 2 - textRenderer.fontHeight / 2;
-        context.drawTextWithShadow(textRenderer, Text.literal(label), slotX + 4, textY, textColor);
+        drawNodeText(context, textRenderer, Text.literal(label), slotX + 4, textY, textColor);
     }
 
     private void renderCoordinateInputFields(DrawContext context, TextRenderer textRenderer, Node node, boolean isOverSidebar) {
@@ -1463,7 +1938,7 @@ public class NodeGraph {
             int labelX = fieldX + Math.max(0, (fieldWidth - labelWidth) / 2);
             int labelY = labelTop + Math.max(0, (labelHeight - textRenderer.fontHeight) / 2);
             int labelColor = editingAxis ? 0xFFB8E7FF : baseLabelColor;
-            context.drawTextWithShadow(textRenderer, Text.literal(axisLabel), labelX, labelY, labelColor);
+            drawNodeText(context, textRenderer, Text.literal(axisLabel), labelX, labelY, labelColor);
 
             int inputBottom = inputTop + fieldHeight;
             int backgroundColor = editingAxis ? activeFieldBackground : fieldBackground;
@@ -1487,7 +1962,7 @@ public class NodeGraph {
 
             int textX = fieldX + 3;
             int textY = inputTop + (fieldHeight - textRenderer.fontHeight) / 2 + 1;
-            context.drawTextWithShadow(textRenderer, Text.literal(display), textX, textY, valueColor);
+            drawNodeText(context, textRenderer, Text.literal(display), textX, textY, valueColor);
 
             if (editingAxis && coordinateCaretVisible) {
                 int caretX = textX + textRenderer.getWidth(display);
@@ -1519,7 +1994,7 @@ public class NodeGraph {
         int fieldWidth = node.getAmountFieldWidth();
 
         int labelY = labelTop + Math.max(0, (labelHeight - textRenderer.fontHeight) / 2);
-        context.drawTextWithShadow(textRenderer, Text.literal("Amount"), fieldLeft + 2, labelY, baseLabelColor);
+        drawNodeText(context, textRenderer, Text.literal("Amount"), fieldLeft + 2, labelY, baseLabelColor);
 
         int fieldBottom = fieldTop + fieldHeight;
         int backgroundColor = editing ? activeFieldBackground : fieldBackground;
@@ -1543,7 +2018,7 @@ public class NodeGraph {
 
         int textX = fieldLeft + 3;
         int textY = fieldTop + (fieldHeight - textRenderer.fontHeight) / 2 + 1;
-        context.drawTextWithShadow(textRenderer, Text.literal(display), textX, textY, valueColor);
+        drawNodeText(context, textRenderer, Text.literal(display), textX, textY, valueColor);
 
         if (editing && amountCaretVisible) {
             int caretX = textX + textRenderer.getWidth(display);
@@ -1574,8 +2049,8 @@ public class NodeGraph {
             return -1;
         }
 
-        int worldX = screenX + cameraX;
-        int worldY = screenY + cameraY;
+        int worldX = screenToWorldX(screenX);
+        int worldY = screenToWorldY(screenY);
         int inputTop = node.getCoordinateFieldInputTop();
         int inputBottom = inputTop + node.getCoordinateFieldHeight();
         if (worldY < inputTop || worldY > inputBottom) {
@@ -1870,8 +2345,8 @@ public class NodeGraph {
             return false;
         }
 
-        int worldX = screenX + cameraX;
-        int worldY = screenY + cameraY;
+        int worldX = screenToWorldX(screenX);
+        int worldY = screenToWorldY(screenY);
         int fieldLeft = node.getAmountFieldLeft();
         int fieldTop = node.getAmountFieldInputTop();
         int fieldWidth = node.getAmountFieldWidth();
@@ -1879,6 +2354,17 @@ public class NodeGraph {
 
         return worldX >= fieldLeft && worldX <= fieldLeft + fieldWidth
             && worldY >= fieldTop && worldY <= fieldTop + fieldHeight;
+    }
+
+    private void drawNodeText(DrawContext context, TextRenderer renderer, Text text, int x, int y, int color) {
+        if (!shouldRenderNodeText()) {
+            return;
+        }
+        context.drawTextWithShadow(renderer, text, x, y, color);
+    }
+
+    private void drawNodeText(DrawContext context, TextRenderer renderer, String text, int x, int y, int color) {
+        drawNodeText(context, renderer, Text.literal(text), x, y, color);
     }
 
     private String trimTextToWidth(String text, TextRenderer renderer, int maxWidth) {
@@ -2131,10 +2617,10 @@ public class NodeGraph {
     }
     
     private boolean isMouseOverStartButton(Node startNode, int mouseX, int mouseY) {
-        int x = startNode.getX() - cameraX;
-        int y = startNode.getY() - cameraY;
-        int centerX = x + startNode.getWidth() / 2;
-        int centerY = y + startNode.getHeight() / 2;
+        int centerX = startNode.getX() + startNode.getWidth() / 2;
+        int centerY = startNode.getY() + startNode.getHeight() / 2;
+        int worldMouseX = screenToWorldX(mouseX);
+        int worldMouseY = screenToWorldY(mouseY);
         
         // Check if mouse is within the triangle area
         int triangleSize = 10;
@@ -2142,8 +2628,8 @@ public class NodeGraph {
         int startX = centerX - triangleSize/2 + offset;
         
         // Simple bounding box check for the triangle
-        return mouseX >= startX && mouseX <= startX + triangleSize &&
-               mouseY >= centerY - triangleSize/2 && mouseY <= centerY + triangleSize/2;
+        return worldMouseX >= startX && worldMouseX <= startX + triangleSize &&
+               worldMouseY >= centerY - triangleSize/2 && worldMouseY <= centerY + triangleSize/2;
     }
     
     public boolean isHoveringStartButton() {

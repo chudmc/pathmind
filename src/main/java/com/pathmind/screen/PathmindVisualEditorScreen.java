@@ -62,6 +62,9 @@ public class PathmindVisualEditorScreen extends Screen {
     private static final int PLAY_BUTTON_MARGIN = 8;
     private static final int STOP_BUTTON_SIZE = 18;
     private static final int CONTROL_BUTTON_GAP = 6;
+    private static final int ZOOM_BUTTON_SIZE = 14;
+    private static final int ZOOM_BUTTON_MARGIN = 6;
+    private static final int ZOOM_BUTTON_SPACING = 4;
     private static final int INFO_POPUP_WIDTH = 320;
     private static final int INFO_POPUP_HEIGHT = 180;
     private static final int TITLE_INTERACTION_PADDING = 4;
@@ -164,8 +167,11 @@ public class PathmindVisualEditorScreen extends Screen {
         
         // Render node graph (stationary nodes only)
         renderNodeGraph(context, mouseX, mouseY, delta, false);
+
+        // Workspace utilities should sit beneath the sidebar when it expands
+        renderWorkspaceButtons(context, mouseX, mouseY);
         
-        // Always render sidebar after node graph to ensure sidebar line is visible
+        // Always render sidebar after node graph/buttons so expanded categories sit on top
         sidebar.render(context, this.textRenderer, mouseX, mouseY, TITLE_BAR_HEIGHT, this.height - TITLE_BAR_HEIGHT);
         
         // Render dragged nodes above sidebar
@@ -176,10 +182,8 @@ public class PathmindVisualEditorScreen extends Screen {
             renderDraggingNode(context, mouseX, mouseY);
         }
         
-        // Render workspace controls in bottom right
-        renderBottomButtons(context, mouseX, mouseY);
-
         boolean controlsDisabled = isPopupObscuringWorkspace();
+        renderZoomControls(context, mouseX, mouseY, controlsDisabled);
 
         if (shouldShowExecutionControls()) {
             renderStopButton(context, mouseX, mouseY, controlsDisabled);
@@ -263,6 +267,46 @@ public class PathmindVisualEditorScreen extends Screen {
             );
         }
     }
+
+    private void renderZoomControls(DrawContext context, int mouseX, int mouseY, boolean disabled) {
+        int buttonY = getZoomButtonY();
+        drawZoomButton(context, getZoomMinusButtonX(), buttonY, mouseX, mouseY, disabled, true, false);
+        drawZoomButton(context, getZoomPlusButtonX(), buttonY, mouseX, mouseY, disabled, false, false);
+    }
+
+    private void drawZoomButton(DrawContext context, int x, int y, int mouseX, int mouseY, boolean disabled, boolean isMinus, boolean active) {
+        boolean hovered = !disabled && isPointInRect(mouseX, mouseY, x, y, ZOOM_BUTTON_SIZE, ZOOM_BUTTON_SIZE);
+        int bgColor = active ? 0xFF353535 : 0xFF2A2A2A;
+        if (hovered) {
+            bgColor = active ? 0xFF3F3F3F : 0xFF333333;
+        } else if (disabled) {
+            bgColor = 0xFF1E1E1E;
+        }
+        context.fill(x + 1, y + 1, x + ZOOM_BUTTON_SIZE - 1, y + ZOOM_BUTTON_SIZE - 1, bgColor);
+
+        int borderColor = active ? ACCENT_COLOR : GREY_LINE;
+        if (hovered) {
+            borderColor = ACCENT_COLOR;
+        } else if (disabled) {
+            borderColor = GREY_LINE;
+        }
+        context.drawBorder(x, y, ZOOM_BUTTON_SIZE, ZOOM_BUTTON_SIZE, borderColor);
+
+        int iconColor;
+        if (disabled) {
+            iconColor = 0xFF555555;
+        } else if (hovered || active) {
+            iconColor = ACCENT_COLOR;
+        } else {
+            iconColor = WHITE;
+        }
+
+        Text iconText = Text.literal(isMinus ? "-" : "+");
+        int iconWidth = this.textRenderer.getWidth(iconText);
+        int iconX = x + (ZOOM_BUTTON_SIZE - iconWidth) / 2 + 1;
+        int iconY = y + (ZOOM_BUTTON_SIZE - this.textRenderer.fontHeight) / 2 + 2;
+        context.drawTextWithShadow(this.textRenderer, iconText, iconX, iconY, iconColor);
+    }
     
     private void renderNodeGraph(DrawContext context, int mouseX, int mouseY, float delta, boolean onlyDragged) {
         if (!onlyDragged) {
@@ -281,27 +325,41 @@ public class PathmindVisualEditorScreen extends Screen {
         int gridSize = 20;
         int startX = Sidebar.getCollapsedWidth();
         int startY = TITLE_BAR_HEIGHT;
-        
-        // Get camera offset from node graph
-        int cameraX = nodeGraph.getCameraX();
-        int cameraY = nodeGraph.getCameraY();
-        
-        // Calculate grid offset based on camera position
-        int gridOffsetX = cameraX % gridSize;
-        int gridOffsetY = cameraY % gridSize;
-        
-        // Adjust starting positions to account for camera offset
-        int adjustedStartX = startX - gridOffsetX;
-        int adjustedStartY = startY - gridOffsetY;
-        
-        // Vertical lines
-        for (int x = adjustedStartX; x < this.width; x += gridSize) {
-            context.drawVerticalLine(x, startY, this.height, 0x40333333);
+        int endX = this.width;
+        int endY = this.height;
+
+        int leftWorld = nodeGraph.screenToWorldX(startX);
+        int rightWorld = nodeGraph.screenToWorldX(endX);
+        if (rightWorld < leftWorld) {
+            int swap = leftWorld;
+            leftWorld = rightWorld;
+            rightWorld = swap;
         }
-        
-        // Horizontal lines
-        for (int y = adjustedStartY; y < this.height; y += gridSize) {
-            context.drawHorizontalLine(startX, this.width, y, 0x40333333);
+
+        int topWorld = nodeGraph.screenToWorldY(startY);
+        int bottomWorld = nodeGraph.screenToWorldY(endY);
+        if (bottomWorld < topWorld) {
+            int swap = topWorld;
+            topWorld = bottomWorld;
+            bottomWorld = swap;
+        }
+
+        int firstVertical = leftWorld - Math.floorMod(leftWorld, gridSize);
+        for (int worldX = firstVertical; worldX <= rightWorld + gridSize; worldX += gridSize) {
+            int screenX = nodeGraph.worldToScreenX(worldX);
+            if (screenX < startX || screenX > endX) {
+                continue;
+            }
+            context.drawVerticalLine(screenX, startY, endY, 0x40333333);
+        }
+
+        int firstHorizontal = topWorld - Math.floorMod(topWorld, gridSize);
+        for (int worldY = firstHorizontal; worldY <= bottomWorld + gridSize; worldY += gridSize) {
+            int screenY = nodeGraph.worldToScreenY(worldY);
+            if (screenY < startY || screenY > endY) {
+                continue;
+            }
+            context.drawHorizontalLine(startX, endX, screenY, 0x40333333);
         }
     }
 
@@ -347,6 +405,19 @@ public class PathmindVisualEditorScreen extends Screen {
             if (isPointInStopButton((int) mouseX, (int) mouseY)) {
                 presetDropdownOpen = false;
                 stopExecutingAllGraphs();
+                return true;
+            }
+        }
+
+        if (!isPopupObscuringWorkspace() && button == 0) {
+            if (isPointInZoomMinus((int) mouseX, (int) mouseY)) {
+                presetDropdownOpen = false;
+                nodeGraph.zoomOut(getWorkspaceCenterX(), getWorkspaceCenterY());
+                return true;
+            }
+            if (isPointInZoomPlus((int) mouseX, (int) mouseY)) {
+                presetDropdownOpen = false;
+                nodeGraph.zoomIn(getWorkspaceCenterX(), getWorkspaceCenterY());
                 return true;
             }
         }
@@ -710,11 +781,62 @@ public class PathmindVisualEditorScreen extends Screen {
             close();
             return true;
         }
+
+        boolean isCtrlOrCmdDown = (modifiers & (GLFW.GLFW_MOD_CONTROL | GLFW.GLFW_MOD_SUPER)) != 0;
+        boolean isShiftDown = (modifiers & GLFW.GLFW_MOD_SHIFT) != 0;
+
+        if (isCtrlOrCmdDown && keyCode == GLFW.GLFW_KEY_Z) {
+            if (isShiftDown) {
+                if (nodeGraph.redo()) {
+                    return true;
+                }
+            } else {
+                if (nodeGraph.undo()) {
+                    return true;
+                }
+            }
+        }
+
+        if (isCtrlOrCmdDown && keyCode == GLFW.GLFW_KEY_Y) {
+            if (nodeGraph.redo()) {
+                return true;
+            }
+        }
         
         // Delete selected node with Delete key
-        if (keyCode == GLFW.GLFW_KEY_DELETE && nodeGraph.getSelectedNode() != null) {
-            nodeGraph.removeNode(nodeGraph.getSelectedNode());
+        if (keyCode == GLFW.GLFW_KEY_DELETE || keyCode == GLFW.GLFW_KEY_BACKSPACE) {
+            if (nodeGraph.deleteSelectedNode()) {
+                return true;
+            }
+        }
+
+        if (isCtrlOrCmdDown && (keyCode == GLFW.GLFW_KEY_EQUAL || keyCode == GLFW.GLFW_KEY_KP_ADD)) {
+            nodeGraph.zoomIn(getWorkspaceCenterX(), getWorkspaceCenterY());
             return true;
+        }
+
+        if (isCtrlOrCmdDown && (keyCode == GLFW.GLFW_KEY_MINUS || keyCode == GLFW.GLFW_KEY_KP_SUBTRACT)) {
+            nodeGraph.zoomOut(getWorkspaceCenterX(), getWorkspaceCenterY());
+            return true;
+        }
+
+        // Copy/Paste/Duplicate selected node
+        if (isCtrlOrCmdDown && keyCode == GLFW.GLFW_KEY_C) {
+            if (nodeGraph.copySelectedNodeToClipboard()) {
+                return true;
+            }
+        }
+
+        if (isCtrlOrCmdDown && keyCode == GLFW.GLFW_KEY_V) {
+            if (nodeGraph.pasteClipboardNode() != null) {
+                return true;
+            }
+        }
+
+        if (isCtrlOrCmdDown && keyCode == GLFW.GLFW_KEY_D) {
+            if (nodeGraph.duplicateSelectedNode() != null) {
+                return true;
+            }
         }
         
         // Don't handle the opening keybind - let it be ignored
@@ -1472,6 +1594,28 @@ public class PathmindVisualEditorScreen extends Screen {
         return TITLE_BAR_HEIGHT + PLAY_BUTTON_MARGIN;
     }
 
+    private int getZoomPlusButtonX() {
+        return this.width - ZOOM_BUTTON_MARGIN - ZOOM_BUTTON_SIZE;
+    }
+
+    private int getZoomMinusButtonX() {
+        return getZoomPlusButtonX() - ZOOM_BUTTON_SIZE - ZOOM_BUTTON_SPACING;
+    }
+
+    private int getZoomButtonY() {
+        return this.height - ZOOM_BUTTON_MARGIN - ZOOM_BUTTON_SIZE;
+    }
+
+    private int getWorkspaceCenterX() {
+        int workspaceLeft = Sidebar.getCollapsedWidth();
+        return workspaceLeft + (this.width - workspaceLeft) / 2;
+    }
+
+    private int getWorkspaceCenterY() {
+        int workspaceTop = TITLE_BAR_HEIGHT;
+        return workspaceTop + (this.height - workspaceTop) / 2;
+    }
+
     private int getStopButtonX() {
         return getPlayButtonX() - CONTROL_BUTTON_GAP - STOP_BUTTON_SIZE;
     }
@@ -1766,14 +1910,22 @@ public class PathmindVisualEditorScreen extends Screen {
         updateImportExportPathFromPreset();
     }
 
-    private void renderBottomButtons(DrawContext context, int mouseX, int mouseY) {
-        int buttonY = getBottomButtonY();
-        renderImportExportButton(context, mouseX, mouseY, buttonY);
-        renderClearButton(context, mouseX, mouseY, buttonY);
-        renderHomeButton(context, mouseX, mouseY, buttonY);
+    private void renderWorkspaceButtons(DrawContext context, int mouseX, int mouseY) {
+        int buttonY = getWorkspaceButtonY();
+        boolean importHovered = renderImportExportButton(context, mouseX, mouseY, buttonY);
+        boolean clearHovered = renderClearButton(context, mouseX, mouseY, buttonY);
+        boolean homeHovered = renderHomeButton(context, mouseX, mouseY, buttonY);
+
+        if (homeHovered) {
+            drawWorkspaceTooltip(context, "Reset view", mouseX, mouseY);
+        } else if (clearHovered) {
+            drawWorkspaceTooltip(context, "Clear workspace", mouseX, mouseY);
+        } else if (importHovered) {
+            drawWorkspaceTooltip(context, "Import / Export", mouseX, mouseY);
+        }
     }
 
-    private void renderHomeButton(DrawContext context, int mouseX, int mouseY, int buttonY) {
+    private boolean renderHomeButton(DrawContext context, int mouseX, int mouseY, int buttonY) {
         int buttonX = getHomeButtonX();
         boolean hovered = renderButtonBackground(context, buttonX, buttonY, mouseX, mouseY, false);
         int iconColor = hovered ? ACCENT_COLOR : WHITE;
@@ -1786,9 +1938,10 @@ public class PathmindVisualEditorScreen extends Screen {
         context.drawHorizontalLine(centerX - 3, centerX - 1, centerY - 1, iconColor);
         context.drawVerticalLine(centerX - 2, centerY - 2, centerY, iconColor);
         context.drawVerticalLine(centerX - 3, centerY - 3, centerY - 1, iconColor);
+        return hovered;
     }
 
-    private void renderClearButton(DrawContext context, int mouseX, int mouseY, int buttonY) {
+    private boolean renderClearButton(DrawContext context, int mouseX, int mouseY, int buttonY) {
         int buttonX = getClearButtonX();
         boolean hovered = renderButtonBackground(context, buttonX, buttonY, mouseX, mouseY, clearPopupVisible);
         int iconColor = (hovered || clearPopupVisible) ? ACCENT_COLOR : WHITE;
@@ -1803,9 +1956,10 @@ public class PathmindVisualEditorScreen extends Screen {
         context.drawVerticalLine(centerX - 3, top + 2, bottom, iconColor);
         context.drawVerticalLine(centerX + 2, top + 2, bottom, iconColor);
         context.drawHorizontalLine(centerX - 3, centerX + 2, bottom, iconColor);
+        return hovered;
     }
 
-    private void renderImportExportButton(DrawContext context, int mouseX, int mouseY, int buttonY) {
+    private boolean renderImportExportButton(DrawContext context, int mouseX, int mouseY, int buttonY) {
         int buttonX = getImportExportButtonX();
         boolean hovered = renderButtonBackground(context, buttonX, buttonY, mouseX, mouseY, importExportPopupVisible);
         int iconColor = (hovered || importExportPopupVisible) ? ACCENT_COLOR : WHITE;
@@ -1824,6 +1978,32 @@ public class PathmindVisualEditorScreen extends Screen {
 
         // Connector line
         context.drawHorizontalLine(centerX - 4, centerX + 3, centerY, iconColor);
+        return hovered;
+    }
+
+    private void drawWorkspaceTooltip(DrawContext context, String text, int mouseX, int mouseY) {
+        int paddingX = 6;
+        int paddingY = 4;
+        int textWidth = this.textRenderer.getWidth(text);
+        int textHeight = this.textRenderer.fontHeight;
+        int boxWidth = textWidth + paddingX * 2;
+        int boxHeight = textHeight + paddingY * 2;
+
+        int x = mouseX + 12;
+        int y = mouseY + 12;
+
+        if (x + boxWidth > this.width) {
+            x = this.width - boxWidth - 4;
+        }
+        if (y + boxHeight > this.height) {
+            y = this.height - boxHeight - 4;
+        }
+
+        int backgroundColor = 0xF01A1A1A;
+        int borderColor = 0x80FFFFFF;
+        context.fill(x, y, x + boxWidth, y + boxHeight, backgroundColor);
+        context.drawBorder(x, y, boxWidth, boxHeight, borderColor);
+        context.drawTextWithShadow(this.textRenderer, Text.literal(text), x + paddingX, y + paddingY, 0xFFE0E0E0);
     }
 
     private boolean renderButtonBackground(DrawContext context, int buttonX, int buttonY, int mouseX, int mouseY, boolean active) {
@@ -1842,40 +2022,40 @@ public class PathmindVisualEditorScreen extends Screen {
         return hovered;
     }
 
-    private int getBottomButtonY() {
-        return this.height - BOTTOM_BUTTON_SIZE - BOTTOM_BUTTON_MARGIN;
+    private int getWorkspaceButtonY() {
+        return TITLE_BAR_HEIGHT + BOTTOM_BUTTON_MARGIN;
     }
 
     private int getHomeButtonX() {
-        return this.width - BOTTOM_BUTTON_SIZE - BOTTOM_BUTTON_MARGIN;
+        return Sidebar.getCollapsedWidth() + BOTTOM_BUTTON_MARGIN + (BOTTOM_BUTTON_SIZE + BOTTOM_BUTTON_SPACING) * 2;
     }
 
     private int getClearButtonX() {
-        return getHomeButtonX() - BOTTOM_BUTTON_SPACING - BOTTOM_BUTTON_SIZE;
+        return Sidebar.getCollapsedWidth() + BOTTOM_BUTTON_MARGIN + BOTTOM_BUTTON_SIZE + BOTTOM_BUTTON_SPACING;
     }
 
     private int getImportExportButtonX() {
-        return getClearButtonX() - BOTTOM_BUTTON_SPACING - BOTTOM_BUTTON_SIZE;
+        return Sidebar.getCollapsedWidth() + BOTTOM_BUTTON_MARGIN;
     }
 
     private boolean isHomeButtonClicked(int mouseX, int mouseY, int button) {
         if (button != 0) return false;
         int buttonX = getHomeButtonX();
-        int buttonY = getBottomButtonY();
+        int buttonY = getWorkspaceButtonY();
         return isPointInRect(mouseX, mouseY, buttonX, buttonY, BOTTOM_BUTTON_SIZE, BOTTOM_BUTTON_SIZE);
     }
 
     private boolean isClearButtonClicked(int mouseX, int mouseY, int button) {
         if (button != 0) return false;
         int buttonX = getClearButtonX();
-        int buttonY = getBottomButtonY();
+        int buttonY = getWorkspaceButtonY();
         return isPointInRect(mouseX, mouseY, buttonX, buttonY, BOTTOM_BUTTON_SIZE, BOTTOM_BUTTON_SIZE);
     }
 
     private boolean isImportExportButtonClicked(int mouseX, int mouseY, int button) {
         if (button != 0) return false;
         int buttonX = getImportExportButtonX();
-        int buttonY = getBottomButtonY();
+        int buttonY = getWorkspaceButtonY();
         return isPointInRect(mouseX, mouseY, buttonX, buttonY, BOTTOM_BUTTON_SIZE, BOTTOM_BUTTON_SIZE);
     }
 
@@ -1885,6 +2065,14 @@ public class PathmindVisualEditorScreen extends Screen {
 
     private boolean isPointInStopButton(int mouseX, int mouseY) {
         return isPointInRect(mouseX, mouseY, getStopButtonX(), getStopButtonY(), STOP_BUTTON_SIZE, STOP_BUTTON_SIZE);
+    }
+
+    private boolean isPointInZoomMinus(int mouseX, int mouseY) {
+        return isPointInRect(mouseX, mouseY, getZoomMinusButtonX(), getZoomButtonY(), ZOOM_BUTTON_SIZE, ZOOM_BUTTON_SIZE);
+    }
+
+    private boolean isPointInZoomPlus(int mouseX, int mouseY) {
+        return isPointInRect(mouseX, mouseY, getZoomPlusButtonX(), getZoomButtonY(), ZOOM_BUTTON_SIZE, ZOOM_BUTTON_SIZE);
     }
 
     private void startExecutingAllGraphs() {

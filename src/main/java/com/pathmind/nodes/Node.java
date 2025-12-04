@@ -3436,6 +3436,20 @@ public class Node {
         if (amountParam != null) {
             quantity = amountParam.getIntValue();
         }
+        String requestedItemLabel = itemId;
+
+        if (itemId != null && !itemId.isEmpty()) {
+            String sanitized = sanitizeResourceId(itemId);
+            if (sanitized != null && !sanitized.isEmpty()) {
+                String normalized = normalizeResourceId(sanitized, "minecraft");
+                if (normalized != null && !normalized.isEmpty()) {
+                    itemId = normalized;
+                    if (!normalized.equals(requestedItemLabel)) {
+                        setParameterValueAndPropagate("Item", normalized);
+                    }
+                }
+            }
+        }
 
         NodeMode craftMode = mode != null ? mode : NodeMode.CRAFT_PLAYER_GUI;
 
@@ -3443,7 +3457,8 @@ public class Node {
 
         Identifier identifier = Identifier.tryParse(itemId);
         if (identifier == null || !Registries.ITEM.containsId(identifier)) {
-            sendNodeErrorMessage(client, "Cannot craft \"" + itemId + "\": unknown item identifier.");
+            String errorLabel = (requestedItemLabel != null && !requestedItemLabel.isEmpty()) ? requestedItemLabel : itemId;
+            sendNodeErrorMessage(client, "Cannot craft \"" + errorLabel + "\": unknown item identifier.");
             future.complete(null);
             return;
         }
