@@ -157,9 +157,10 @@ public class PathmindVisualEditorScreen extends Screen {
         context.drawHorizontalLine(0, this.width, TITLE_BAR_HEIGHT, GREY_LINE);
         
         boolean titleHovered = isTitleHovered(mouseX, mouseY);
+        boolean titleActive = titleHovered || infoPopupVisible;
 
         // Render title bar text
-        drawTitle(context, titleHovered);
+        drawTitle(context, titleActive);
         
         // Update mouse hover for socket highlighting
         nodeGraph.updateMouseHover(mouseX, mouseY);
@@ -216,7 +217,7 @@ public class PathmindVisualEditorScreen extends Screen {
         // Re-render title bar on top of everything to ensure it's always visible
         context.fill(0, 0, this.width, TITLE_BAR_HEIGHT, DARK_GREY_ALT);
         context.drawHorizontalLine(0, this.width, TITLE_BAR_HEIGHT, GREY_LINE);
-        drawTitle(context, titleHovered);
+        drawTitle(context, titleActive);
 
         // Controls are already rendered before overlays so they appear dimmed underneath
     }
@@ -2061,16 +2062,20 @@ public class PathmindVisualEditorScreen extends Screen {
         return TITLE_BAR_HEIGHT + BOTTOM_BUTTON_MARGIN;
     }
 
+    private int getSidebarVisibleWidth() {
+        return sidebar != null ? sidebar.getWidth() : Sidebar.getCollapsedWidth();
+    }
+
     private int getHomeButtonX() {
-        return Sidebar.getCollapsedWidth() + BOTTOM_BUTTON_MARGIN + (BOTTOM_BUTTON_SIZE + BOTTOM_BUTTON_SPACING) * 2;
+        return getSidebarVisibleWidth() + BOTTOM_BUTTON_MARGIN + (BOTTOM_BUTTON_SIZE + BOTTOM_BUTTON_SPACING) * 2;
     }
 
     private int getClearButtonX() {
-        return Sidebar.getCollapsedWidth() + BOTTOM_BUTTON_MARGIN + BOTTOM_BUTTON_SIZE + BOTTOM_BUTTON_SPACING;
+        return getSidebarVisibleWidth() + BOTTOM_BUTTON_MARGIN + BOTTOM_BUTTON_SIZE + BOTTOM_BUTTON_SPACING;
     }
 
     private int getImportExportButtonX() {
-        return Sidebar.getCollapsedWidth() + BOTTOM_BUTTON_MARGIN;
+        return getSidebarVisibleWidth() + BOTTOM_BUTTON_MARGIN;
     }
 
     private boolean isHomeButtonClicked(int mouseX, int mouseY, int button) {
