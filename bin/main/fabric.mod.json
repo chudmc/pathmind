@@ -3,7 +3,7 @@
   "id": "pathmind",
   "version": "${version}",
   "name": "Pathmind",
-  "description": "A Minecraft Fabric mod that enhances gameplay with intelligent features, now integrated with Baritone pathfinding.",
+  "description": "A Minecraft Fabric mod that enhances gameplay with intelligent features.",
   "authors": [
     "YourName"
   ],
@@ -24,16 +24,12 @@
     ]
   },
   "mixins": [
-    "pathmind.mixins.json",
-    "mixins.baritone.json"
+    "pathmind.mixins.json"
   ],
   "depends": {
     "fabricloader": ">=0.17.2",
     "minecraft": "~1.21.8",
     "java": ">=21",
     "fabric-api": "*"
-  },
-  "suggests": {
-    "another-mod": "*"
   }
 }

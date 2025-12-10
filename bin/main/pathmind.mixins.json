@@ -3,13 +3,9 @@
   "minVersion": "0.8",
   "package": "com.pathmind.mixin",
   "compatibilityLevel": "JAVA_21",
-  "mixins": [
-    // Add your mixins here
-    // "ExampleMixin"
-  ],
+  "mixins": [],
   "client": [
-    // Add your client mixins here
-    // "ExampleClientMixin"
+    "ScreenAccessor"
   ],
   "injectors": {
     "defaultRequire": 1

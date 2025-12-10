@@ -704,7 +704,7 @@ public class ExecutionManager {
             } else if (nodeData.getAttachedParameterId() != null) {
                 Node host = nodeMap.get(nodeData.getId());
                 Node parameter = nodeMap.get(nodeData.getAttachedParameterId());
-                if (host != null && parameter != null) {
+                if (host != null && parameter != null && parameter.getParentParameterHost() == null) {
                     host.attachParameter(parameter);
                 }
             }
@@ -718,7 +718,8 @@ public class ExecutionManager {
             if (nodeData.getParentParameterHostId() != null) {
                 Node parameter = nodeMap.get(nodeData.getId());
                 Node host = nodeMap.get(nodeData.getParentParameterHostId());
-                if (parameter != null && host != null && parameter.isParameterNode()) {
+                if (parameter != null && host != null && parameter.isParameterNode()
+                    && parameter.getParentParameterHost() == null) {
                     host.attachParameter(parameter);
                 }
             }

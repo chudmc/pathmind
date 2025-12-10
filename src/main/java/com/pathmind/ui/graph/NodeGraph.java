@@ -1,0 +1,3307 @@
+package com.pathmind.ui.graph;
+
+import com.pathmind.data.NodeGraphData;
+import com.pathmind.data.NodeGraphPersistence;
+import com.pathmind.data.PresetManager;
+import com.pathmind.nodes.Node;
+import com.pathmind.nodes.NodeCategory;
+import com.pathmind.nodes.NodeConnection;
+import com.pathmind.nodes.NodeParameter;
+import com.pathmind.nodes.NodeType;
+import com.pathmind.nodes.ParameterType;
+import com.pathmind.execution.ExecutionManager;
+import org.lwjgl.glfw.GLFW;
+import net.minecraft.client.gui.DrawContext;
+import net.minecraft.client.font.TextRenderer;
+import net.minecraft.text.Text;
+
+import java.nio.file.Path;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Deque;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+
+/**
+ * Manages the node graph for the Pathmind visual editor.
+ * Handles node rendering, connections, and interactions.
+ */
+public class NodeGraph {
+    private static final int CONNECTION_DOT_SPACING = 12;
+    private static final int CONNECTION_DOT_LENGTH = 4;
+    private static final int CONNECTION_ANIMATION_STEP_MS = 50;
+    private static final int DUPLICATE_OFFSET_X = 32;
+    private static final int DUPLICATE_OFFSET_Y = 24;
+    private static final int SELECTION_BOX_MIN_DRAG = 3;
+
+    private final List<Node> nodes;
+    private final List<NodeConnection> connections;
+    private Node selectedNode;
+    private final LinkedHashSet<Node> selectedNodes;
+    private Node draggingNode;
+    private int draggingNodeStartX;
+    private int draggingNodeStartY;
+    private boolean draggingNodeDetached;
+    private NodeGraphData pendingDragUndoSnapshot = null;
+    private boolean dragOperationChanged = false;
+    
+    // Camera/viewport for infinite scrolling
+    private int cameraX = 0;
+    private int cameraY = 0;
+    private boolean isPanning = false;
+    private int panStartX, panStartY;
+    private int panStartCameraX, panStartCameraY;
+    
+    // Connection dragging state
+    private boolean isDraggingConnection = false;
+    private Node connectionSourceNode;
+    private int connectionSourceSocket;
+    private boolean isOutputSocket; // true if dragging from output, false if from input
+    private int connectionDragX, connectionDragY;
+    private Node hoveredNode = null;
+    private int hoveredSocket = -1;
+    private boolean hoveredSocketIsInput = false;
+    
+    // Store the original connection that was disconnected
+    private NodeConnection disconnectedConnection = null;
+    
+    // Socket hover state
+    private Node hoveredSocketNode = null;
+    private int hoveredSocketIndex = -1;
+
+    // Start button hover state
+    private boolean hoveringStartButton = false;
+    private Node hoveredStartNode = null;
+    private boolean lastStartButtonTriggeredExecution = false;
+
+    private Node sensorDropTarget = null;
+    private Node actionDropTarget = null;
+    private Node parameterDropTarget = null;
+    private Integer parameterDropSlotIndex = null;
+    
+    // Double-click detection
+    private long lastClickTime = 0;
+    private Node lastClickedNode = null;
+    private static final long DOUBLE_CLICK_THRESHOLD = 300; // milliseconds
+    private int sidebarWidthForRendering = 180;
+
+    private String activePreset;
+    private final Set<Node> cascadeDeletionPreviewNodes;
+
+    private static final long COORDINATE_CARET_BLINK_INTERVAL_MS = 500;
+    private static final String[] COORDINATE_AXES = {"X", "Y", "Z"};
+
+    private Node coordinateEditingNode = null;
+    private int coordinateEditingAxis = -1;
+    private String coordinateEditBuffer = "";
+    private String coordinateEditOriginalValue = "";
+    private long coordinateCaretLastToggleTime = 0L;
+    private boolean coordinateCaretVisible = true;
+    private Node amountEditingNode = null;
+    private String amountEditBuffer = "";
+    private String amountEditOriginalValue = "";
+    private long amountCaretLastToggleTime = 0L;
+    private boolean amountCaretVisible = true;
+    private boolean workspaceDirty = false;
+    private ZoomLevel zoomLevel = ZoomLevel.FOCUSED;
+    private ClipboardSnapshot clipboardNodeSnapshot = null;
+    private final Deque<NodeGraphData> undoStack = new ArrayDeque<>();
+    private final Deque<NodeGraphData> redoStack = new ArrayDeque<>();
+    private boolean suppressUndoCapture = false;
+    private static final int MAX_HISTORY = 50;
+    private boolean selectionBoxActive = false;
+    private int selectionBoxStartX = 0;
+    private int selectionBoxStartY = 0;
+    private int selectionBoxCurrentX = 0;
+    private int selectionBoxCurrentY = 0;
+    private boolean multiDragActive = false;
+    private final Map<Node, DragStartInfo> multiDragStartPositions = new HashMap<>();
+    private boolean selectionDeletionPreviewActive = false;
+
+    public enum ZoomLevel {
+        FOCUSED(1.0f, true),
+        OVERVIEW(0.35f, false),
+        DISTANT(0.18f, false);
+
+        private final float scale;
+        private final boolean showText;
+
+        ZoomLevel(float scale, boolean showText) {
+            this.scale = scale;
+            this.showText = showText;
+        }
+
+        public float getScale() {
+            return scale;
+        }
+
+        public boolean shouldShowText() {
+            return showText;
+        }
+    }
+
+    private static final class ClipboardSnapshot {
+        private final NodeGraphData data;
+        private final List<String> selectionIds;
+        private final int anchorX;
+        private final int anchorY;
+
+        private ClipboardSnapshot(NodeGraphData data, List<String> selectionIds, int anchorX, int anchorY) {
+            this.data = data;
+            this.selectionIds = selectionIds;
+            this.anchorX = anchorX;
+            this.anchorY = anchorY;
+        }
+    }
+
+    private static final class SelectionBounds {
+        private final int minX;
+        private final int minY;
+        private final int maxX;
+        private final int maxY;
+
+        private SelectionBounds(int minX, int minY, int maxX, int maxY) {
+            this.minX = minX;
+            this.minY = minY;
+            this.maxX = maxX;
+            this.maxY = maxY;
+        }
+
+        private boolean isValid() {
+            return minX <= maxX && minY <= maxY;
+        }
+    }
+
+    private static final class DragStartInfo {
+        private final int x;
+        private final int y;
+
+        private DragStartInfo(int x, int y) {
+            this.x = x;
+            this.y = y;
+        }
+    }
+
+    public ZoomLevel getZoomLevel() {
+        return zoomLevel;
+    }
+
+    public boolean isZoomedOut() {
+        return zoomLevel != ZoomLevel.FOCUSED;
+    }
+
+    public void setZoomLevel(ZoomLevel newLevel, int anchorScreenX, int anchorScreenY) {
+        if (newLevel == null || newLevel == this.zoomLevel) {
+            return;
+        }
+        int anchorWorldX = screenToWorldX(anchorScreenX);
+        int anchorWorldY = screenToWorldY(anchorScreenY);
+        this.zoomLevel = newLevel;
+        alignCameraToAnchor(anchorWorldX, anchorWorldY, anchorScreenX, anchorScreenY);
+    }
+
+    private void alignCameraToAnchor(int anchorWorldX, int anchorWorldY, int anchorScreenX, int anchorScreenY) {
+        float scale = getZoomScale();
+        if (scale == 0.0f) {
+            scale = 1.0f;
+        }
+        cameraX = Math.round(anchorWorldX - anchorScreenX / scale);
+        cameraY = Math.round(anchorWorldY - anchorScreenY / scale);
+    }
+
+    private float getZoomScale() {
+        return zoomLevel.getScale();
+    }
+
+    private boolean shouldRenderNodeText() {
+        return zoomLevel.shouldShowText();
+    }
+
+    public boolean canZoomIn() {
+        return zoomLevel.ordinal() > 0;
+    }
+
+    public boolean canZoomOut() {
+        return zoomLevel.ordinal() < ZoomLevel.values().length - 1;
+    }
+
+    public void zoomIn(int anchorScreenX, int anchorScreenY) {
+        if (!canZoomIn()) {
+            return;
+        }
+        ZoomLevel target = ZoomLevel.values()[zoomLevel.ordinal() - 1];
+        setZoomLevel(target, anchorScreenX, anchorScreenY);
+    }
+
+    public void zoomOut(int anchorScreenX, int anchorScreenY) {
+        if (!canZoomOut()) {
+            return;
+        }
+        ZoomLevel target = ZoomLevel.values()[zoomLevel.ordinal() + 1];
+        setZoomLevel(target, anchorScreenX, anchorScreenY);
+    }
+
+    public boolean isDefaultZoom() {
+        return zoomLevel == ZoomLevel.FOCUSED;
+    }
+
+    public NodeGraph() {
+        this.nodes = new ArrayList<>();
+        this.connections = new ArrayList<>();
+        this.selectedNode = null;
+        this.selectedNodes = new LinkedHashSet<>();
+        this.draggingNode = null;
+        this.draggingNodeStartX = 0;
+        this.draggingNodeStartY = 0;
+        this.draggingNodeDetached = false;
+        this.activePreset = PresetManager.getActivePreset();
+        this.cascadeDeletionPreviewNodes = new HashSet<>();
+
+        // Add preset nodes similar to Blender's shader editor
+        // Will be initialized with proper centering when screen dimensions are available
+    }
+    
+    public void initializeWithScreenDimensions(int screenWidth, int screenHeight, int sidebarWidth, int titleBarHeight) {
+        // Clear any existing nodes
+        nodes.clear();
+        connections.clear();
+        
+        // Calculate workspace area
+        int workspaceStartX = sidebarWidth;
+        int workspaceStartY = titleBarHeight;
+        int workspaceWidth = screenWidth - sidebarWidth;
+        int workspaceHeight = screenHeight - titleBarHeight;
+        
+        // Center nodes in the workspace
+        int centerX = workspaceStartX + workspaceWidth / 2;
+        int centerY = workspaceStartY + workspaceHeight / 2;
+        
+        // Position nodes with proper spacing, centered in workspace
+        Node startNode = new Node(NodeType.START, centerX - 100, centerY - 50);
+        nodes.add(startNode);
+        
+        Node middleNode = new Node(NodeType.GOTO, centerX, centerY - 50);
+        nodes.add(middleNode);
+        
+        // Connect them
+        connections.add(new NodeConnection(startNode, middleNode, 0, 0));
+    }
+
+
+    public void addNode(Node node) {
+        nodes.add(node);
+    }
+
+    public void removeNode(Node node) {
+        if (node == null) {
+            return;
+        }
+        pushUndoState();
+        removeNodeInternal(node, true, true);
+        workspaceDirty = true;
+    }
+
+    private void removeNodeInternal(Node node, boolean autoReconnect, boolean repositionDetachments) {
+        if (node == null) {
+            return;
+        }
+
+        if (coordinateEditingNode == node) {
+            stopCoordinateEditing(false);
+        }
+
+        if (amountEditingNode == node) {
+            stopAmountEditing(false);
+        }
+
+        if (node.hasAttachedSensor()) {
+            Node attached = node.getAttachedSensor();
+            node.detachSensor();
+            if (repositionDetachments && attached != null) {
+                attached.setPosition(node.getX() + node.getWidth() + 12, node.getY());
+            }
+        }
+
+        if (node.hasAttachedActionNode()) {
+            Node attached = node.getAttachedActionNode();
+            node.detachActionNode();
+            if (repositionDetachments && attached != null) {
+                attached.setPosition(node.getX() + node.getWidth() + 12, node.getY());
+            }
+        }
+
+        if (node.isSensorNode() && node.isAttachedToControl()) {
+            Node parent = node.getParentControl();
+            if (parent != null) {
+                parent.detachSensor();
+            }
+        }
+
+        if (node.isAttachedToActionControl()) {
+            Node parent = node.getParentActionControl();
+            if (parent != null) {
+                parent.detachActionNode();
+            }
+        }
+
+        if (node.isParameterNode() && node.getParentParameterHost() != null) {
+            Node parent = node.getParentParameterHost();
+            int slotIndex = node.getParentParameterSlotIndex();
+            if (parent != null) {
+                parent.detachParameter(slotIndex);
+            }
+        }
+
+        if (node.hasAttachedParameter()) {
+            List<Integer> parameterSlots = new ArrayList<>(node.getAttachedParameters().keySet());
+            for (Integer slotIndex : parameterSlots) {
+                node.detachParameter(slotIndex);
+            }
+        }
+
+        if (sensorDropTarget == node) {
+            sensorDropTarget = null;
+            actionDropTarget = null;
+            parameterDropTarget = null;
+            parameterDropSlotIndex = null;
+        }
+
+        if (actionDropTarget == node) {
+            actionDropTarget = null;
+        }
+
+        if (parameterDropTarget == node) {
+            parameterDropTarget = null;
+            parameterDropSlotIndex = null;
+        }
+
+        if (autoReconnect) {
+            List<NodeConnection> inputConnections = new ArrayList<>();
+            List<NodeConnection> outputConnections = new ArrayList<>();
+
+            for (NodeConnection conn : connections) {
+                if (conn.getOutputNode().equals(node)) {
+                    outputConnections.add(conn);
+                } else if (conn.getInputNode().equals(node)) {
+                    inputConnections.add(conn);
+                }
+            }
+
+            for (NodeConnection inputConn : inputConnections) {
+                Node inputSource = inputConn.getOutputNode();
+                int inputSocket = inputConn.getOutputSocket();
+
+                for (NodeConnection outputConn : outputConnections) {
+                    Node outputTarget = outputConn.getInputNode();
+                    int outputSocket = outputConn.getInputSocket();
+
+                    connections.add(new NodeConnection(inputSource, outputTarget, inputSocket, outputSocket));
+                }
+            }
+        }
+
+        connections.removeIf(conn ->
+            conn.getOutputNode().equals(node) || conn.getInputNode().equals(node));
+        nodes.remove(node);
+
+        if (selectedNodes.remove(node)) {
+            node.setSelected(false);
+            if (selectedNode == node) {
+                selectedNode = selectedNodes.isEmpty() ? null : selectedNodes.iterator().next();
+            }
+        }
+        if (draggingNode == node) {
+            draggingNode = null;
+        }
+    }
+
+    public Node getNodeAt(int x, int y) {
+        // Convert screen coordinates to world coordinates
+        int worldX = screenToWorldX(x);
+        int worldY = screenToWorldY(y);
+
+        for (Node node : nodes) {
+            if (node.isSensorNode() && node.containsPoint(worldX, worldY)) {
+                if (node.hasAttachedParameter()) {
+                    for (Node parameter : node.getAttachedParameters().values()) {
+                        if (parameter != null && parameter.containsPoint(worldX, worldY)) {
+                            return parameter;
+                        }
+                    }
+                }
+                return node;
+            }
+        }
+
+        for (int i = nodes.size() - 1; i >= 0; i--) {
+            Node node = nodes.get(i);
+            if (!node.isParameterNode()) {
+                continue;
+            }
+            if (node.containsPoint(worldX, worldY)) {
+                return node;
+            }
+        }
+
+        for (int i = nodes.size() - 1; i >= 0; i--) {
+            Node node = nodes.get(i);
+            if (node.isSensorNode() || node.isParameterNode()) {
+                continue;
+            }
+            if (node.containsPoint(worldX, worldY)) {
+                return node;
+            }
+        }
+        return null;
+    }
+
+    public void selectNode(Node node) {
+        if (node == null) {
+            clearSelection();
+            return;
+        }
+        clearSelection();
+        addNodeToSelection(node);
+    }
+
+    public void selectNodes(Collection<Node> nodesToSelect) {
+        clearSelection();
+        if (nodesToSelect == null) {
+            return;
+        }
+        for (Node node : nodesToSelect) {
+            addNodeToSelection(node);
+        }
+    }
+
+    public Set<Node> getSelectedNodes() {
+        return Collections.unmodifiableSet(selectedNodes);
+    }
+
+    public void setSelectionDeletionPreviewActive(boolean active) {
+        selectionDeletionPreviewActive = active;
+    }
+
+    public boolean isNodeSelected(Node node) {
+        if (node == null) {
+            return false;
+        }
+        return selectedNodes.contains(node);
+    }
+
+    public void focusSelectedNode(Node node) {
+        if (node == null) {
+            return;
+        }
+        if (!selectedNodes.contains(node)) {
+            selectNode(node);
+            return;
+        }
+        selectedNode = node;
+        node.setSelected(true);
+    }
+
+    private SelectionBounds calculateBounds(Collection<Node> nodesToMeasure) {
+        if (nodesToMeasure == null || nodesToMeasure.isEmpty()) {
+            return null;
+        }
+        int minX = Integer.MAX_VALUE;
+        int minY = Integer.MAX_VALUE;
+        int maxX = Integer.MIN_VALUE;
+        int maxY = Integer.MIN_VALUE;
+        for (Node node : nodesToMeasure) {
+            if (node == null) {
+                continue;
+            }
+            minX = Math.min(minX, node.getX());
+            minY = Math.min(minY, node.getY());
+            maxX = Math.max(maxX, node.getX() + node.getWidth());
+            maxY = Math.max(maxY, node.getY() + node.getHeight());
+        }
+        if (minX == Integer.MAX_VALUE) {
+            return null;
+        }
+        return new SelectionBounds(minX, minY, maxX, maxY);
+    }
+
+    private void addNodeToSelection(Node node) {
+        if (node == null) {
+            return;
+        }
+        if (selectedNodes.add(node)) {
+            node.setSelected(true);
+            selectedNode = node;
+        }
+    }
+
+    private void clearSelection() {
+        if (selectedNodes.isEmpty()) {
+            selectedNode = null;
+            return;
+        }
+        for (Node entry : selectedNodes) {
+            entry.setSelected(false);
+        }
+        selectedNodes.clear();
+        selectedNode = null;
+    }
+
+    public void beginSelectionBox(int screenX, int screenY) {
+        selectionBoxActive = true;
+        selectionBoxStartX = screenX;
+        selectionBoxStartY = screenY;
+        selectionBoxCurrentX = screenX;
+        selectionBoxCurrentY = screenY;
+    }
+
+    public void updateSelectionBox(int screenX, int screenY) {
+        if (!selectionBoxActive) {
+            return;
+        }
+        selectionBoxCurrentX = screenX;
+        selectionBoxCurrentY = screenY;
+        if (hasSelectionBoxDrag()) {
+            applySelectionBoxSelection();
+        }
+    }
+
+    public void completeSelectionBox() {
+        if (!selectionBoxActive) {
+            return;
+        }
+        if (hasSelectionBoxDrag()) {
+            applySelectionBoxSelection();
+        }
+        selectionBoxActive = false;
+    }
+
+    public boolean isSelectionBoxActive() {
+        return selectionBoxActive;
+    }
+
+    private boolean hasSelectionBoxDrag() {
+        int deltaX = Math.abs(selectionBoxCurrentX - selectionBoxStartX);
+        int deltaY = Math.abs(selectionBoxCurrentY - selectionBoxStartY);
+        return deltaX >= SELECTION_BOX_MIN_DRAG || deltaY >= SELECTION_BOX_MIN_DRAG;
+    }
+
+    private void applySelectionBoxSelection() {
+        int left = Math.min(selectionBoxStartX, selectionBoxCurrentX);
+        int right = Math.max(selectionBoxStartX, selectionBoxCurrentX);
+        int top = Math.min(selectionBoxStartY, selectionBoxCurrentY);
+        int bottom = Math.max(selectionBoxStartY, selectionBoxCurrentY);
+        int worldLeft = screenToWorldX(left);
+        int worldRight = screenToWorldX(right);
+        int worldTop = screenToWorldY(top);
+        int worldBottom = screenToWorldY(bottom);
+
+        List<Node> inside = new ArrayList<>();
+        for (Node node : nodes) {
+            if (node == null) {
+                continue;
+            }
+            int nodeLeft = node.getX();
+            int nodeRight = node.getX() + node.getWidth();
+            int nodeTop = node.getY();
+            int nodeBottom = node.getY() + node.getHeight();
+            boolean intersecting = nodeRight >= worldLeft &&
+                    nodeLeft <= worldRight &&
+                    nodeBottom >= worldTop &&
+                    nodeTop <= worldBottom;
+            if (intersecting) {
+                inside.add(node);
+            }
+        }
+        selectNodes(inside);
+    }
+
+    public void resetDropTargets() {
+        sensorDropTarget = null;
+        actionDropTarget = null;
+        parameterDropTarget = null;
+        parameterDropSlotIndex = null;
+    }
+
+    private void bringNodeToFront(Node node) {
+        if (node == null) {
+            return;
+        }
+        Node root = getRootNode(node);
+        List<Node> hierarchy = new ArrayList<>();
+        collectHierarchy(root, hierarchy, new HashSet<>());
+        // Remove all hierarchy nodes from current ordering
+        for (Node member : hierarchy) {
+            nodes.remove(member);
+        }
+        // Append in hierarchy order so they render above others
+        nodes.addAll(hierarchy);
+    }
+
+    private Node getRootNode(Node node) {
+        Node current = node;
+        Node parent;
+        while ((parent = getParentForNode(current)) != null) {
+            current = parent;
+        }
+        return current;
+    }
+
+    private void collectHierarchy(Node node, List<Node> result, Set<Node> visited) {
+        if (node == null || visited.contains(node)) {
+            return;
+        }
+        visited.add(node);
+        result.add(node);
+
+        Node actionChild = node.getAttachedActionNode();
+        collectHierarchy(actionChild, result, visited);
+
+        Node sensorChild = node.getAttachedSensor();
+        collectHierarchy(sensorChild, result, visited);
+
+        Map<Integer, Node> parameterMap = node.getAttachedParameters();
+        if (parameterMap != null && !parameterMap.isEmpty()) {
+            List<Integer> keys = new ArrayList<>(parameterMap.keySet());
+            Collections.sort(keys);
+            for (Integer key : keys) {
+                collectHierarchy(parameterMap.get(key), result, visited);
+            }
+        }
+    }
+
+    public Node getSelectedNode() {
+        return selectedNode;
+    }
+
+    public boolean copySelectedNodeToClipboard() {
+        if (selectedNodes.isEmpty()) {
+            return false;
+        }
+        ClipboardSnapshot snapshot = createClipboardSnapshot(selectedNodes);
+        if (snapshot == null) {
+            return false;
+        }
+        clipboardNodeSnapshot = snapshot;
+        return true;
+    }
+
+    public Node duplicateSelectedNode() {
+        if (selectedNodes.isEmpty()) {
+            return null;
+        }
+        ClipboardSnapshot snapshot = createClipboardSnapshot(selectedNodes);
+        if (snapshot == null) {
+            return null;
+        }
+        clipboardNodeSnapshot = snapshot;
+        pushUndoState();
+        SelectionBounds bounds = calculateBounds(selectedNodes);
+        int anchorX = bounds != null ? bounds.minX : snapshot.anchorX;
+        int anchorY = bounds != null ? bounds.minY : snapshot.anchorY;
+        return instantiateClipboardSnapshot(snapshot, anchorX + DUPLICATE_OFFSET_X, anchorY + DUPLICATE_OFFSET_Y);
+    }
+
+    public Node pasteClipboardNode() {
+        if (clipboardNodeSnapshot == null) {
+            return null;
+        }
+        SelectionBounds bounds = calculateBounds(selectedNodes);
+        int baseX = bounds != null ? bounds.minX : clipboardNodeSnapshot.anchorX;
+        int baseY = bounds != null ? bounds.minY : clipboardNodeSnapshot.anchorY;
+        pushUndoState();
+        return instantiateClipboardSnapshot(clipboardNodeSnapshot, baseX + DUPLICATE_OFFSET_X, baseY + DUPLICATE_OFFSET_Y);
+    }
+
+    public boolean deleteSelectedNode() {
+        if (selectedNodes.isEmpty()) {
+            return false;
+        }
+        List<Node> targets = new ArrayList<>(selectedNodes);
+        pushUndoState();
+        for (Node node : targets) {
+            removeNodeCascade(node, false);
+        }
+        clearSelection();
+        workspaceDirty = true;
+        return true;
+    }
+
+    private ClipboardSnapshot createClipboardSnapshot(Collection<Node> selection) {
+        if (selection == null || selection.isEmpty()) {
+            return null;
+        }
+        List<Node> hierarchy = new ArrayList<>();
+        Set<Node> visited = new HashSet<>();
+        for (Node node : selection) {
+            collectHierarchy(node, hierarchy, visited);
+        }
+        if (hierarchy.isEmpty()) {
+            return null;
+        }
+        Set<Node> subset = new LinkedHashSet<>(hierarchy);
+        List<NodeConnection> subsetConnections = new ArrayList<>();
+        for (NodeConnection connection : connections) {
+            if (subset.contains(connection.getOutputNode()) && subset.contains(connection.getInputNode())) {
+                subsetConnections.add(connection);
+            }
+        }
+        NodeGraphData data = buildGraphData(hierarchy, subsetConnections, subset);
+        if (data == null) {
+            return null;
+        }
+        SelectionBounds bounds = calculateBounds(subset);
+        int anchorX = bounds != null ? bounds.minX : 0;
+        int anchorY = bounds != null ? bounds.minY : 0;
+        List<String> selectionIds = new ArrayList<>();
+        for (Node node : selection) {
+            if (node != null) {
+                selectionIds.add(node.getId());
+            }
+        }
+        return new ClipboardSnapshot(data, selectionIds, anchorX, anchorY);
+    }
+
+    private Node instantiateClipboardSnapshot(ClipboardSnapshot snapshot, int targetAnchorX, int targetAnchorY) {
+        if (snapshot == null || snapshot.data == null) {
+            return null;
+        }
+        int offsetX = targetAnchorX - snapshot.anchorX;
+        int offsetY = targetAnchorY - snapshot.anchorY;
+        Map<String, Node> idToNode = new HashMap<>();
+
+        for (NodeGraphData.NodeData nodeData : snapshot.data.getNodes()) {
+            if (nodeData.getType() == null) {
+                continue;
+            }
+            Node newNode = new Node(nodeData.getType(), nodeData.getX() + offsetX, nodeData.getY() + offsetY);
+            if (nodeData.getMode() != null) {
+                newNode.setMode(nodeData.getMode());
+            }
+            List<NodeGraphData.ParameterData> params = nodeData.getParameters();
+            if (params != null) {
+                newNode.getParameters().clear();
+                for (NodeGraphData.ParameterData paramData : params) {
+                    ParameterType parameterType = ParameterType.STRING;
+                    String typeName = paramData.getType();
+                    if (typeName != null) {
+                        try {
+                            parameterType = ParameterType.valueOf(typeName);
+                        } catch (IllegalArgumentException ignored) {
+                            parameterType = ParameterType.STRING;
+                        }
+                    }
+                    String value = paramData.getValue() == null ? "" : paramData.getValue();
+                    NodeParameter parameter = new NodeParameter(paramData.getName(), parameterType, value);
+                    newNode.getParameters().add(parameter);
+                }
+                newNode.recalculateDimensions();
+            }
+            nodes.add(newNode);
+            idToNode.put(nodeData.getId(), newNode);
+        }
+
+        for (NodeGraphData.NodeData nodeData : snapshot.data.getNodes()) {
+            Node parent = idToNode.get(nodeData.getId());
+            if (parent == null) {
+                continue;
+            }
+            String sensorId = nodeData.getAttachedSensorId();
+            if (sensorId != null) {
+                Node sensor = idToNode.get(sensorId);
+                if (sensor != null) {
+                    parent.attachSensor(sensor);
+                }
+            }
+            String actionId = nodeData.getAttachedActionId();
+            if (actionId != null) {
+                Node action = idToNode.get(actionId);
+                if (action != null) {
+                    parent.attachActionNode(action);
+                }
+            }
+
+            List<NodeGraphData.ParameterAttachmentData> attachments = nodeData.getParameterAttachments();
+            if (attachments != null && !attachments.isEmpty()) {
+                List<NodeGraphData.ParameterAttachmentData> ordered = new ArrayList<>(attachments);
+                ordered.sort(java.util.Comparator.comparingInt(NodeGraphData.ParameterAttachmentData::getSlotIndex));
+                for (NodeGraphData.ParameterAttachmentData attachment : ordered) {
+                    Node parameterNode = idToNode.get(attachment.getParameterNodeId());
+                    if (parameterNode != null) {
+                        parent.attachParameter(parameterNode, attachment.getSlotIndex());
+                    }
+                }
+            }
+        }
+
+        if (snapshot.data.getConnections() != null) {
+            for (NodeGraphData.ConnectionData connData : snapshot.data.getConnections()) {
+                Node outputNode = idToNode.get(connData.getOutputNodeId());
+                Node inputNode = idToNode.get(connData.getInputNodeId());
+                if (outputNode == null || inputNode == null || outputNode.isSensorNode() || inputNode.isSensorNode()) {
+                    continue;
+                }
+                connections.add(new NodeConnection(outputNode, inputNode, connData.getOutputSocket(), connData.getInputSocket()));
+            }
+        }
+
+        List<Node> clonesForSelection = new ArrayList<>();
+        if (snapshot.selectionIds != null) {
+            for (String originalId : snapshot.selectionIds) {
+                Node clone = idToNode.get(originalId);
+                if (clone != null) {
+                    clonesForSelection.add(clone);
+                }
+            }
+        }
+
+        Node primaryClone = null;
+        if (!clonesForSelection.isEmpty()) {
+            primaryClone = clonesForSelection.get(0);
+            selectNodes(clonesForSelection);
+            for (Node clone : clonesForSelection) {
+                bringNodeToFront(clone);
+            }
+        } else if (!idToNode.isEmpty()) {
+            primaryClone = idToNode.values().iterator().next();
+            selectNode(primaryClone);
+            bringNodeToFront(primaryClone);
+        }
+
+        workspaceDirty = true;
+        return primaryClone;
+    }
+
+    private NodeGraphData buildGraphData(Collection<Node> nodeCollection, Collection<NodeConnection> connectionCollection, Set<Node> allowedNodes) {
+        NodeGraphData data = new NodeGraphData();
+        if (nodeCollection == null) {
+            return data;
+        }
+        Set<Node> allowed = allowedNodes != null ? allowedNodes : new LinkedHashSet<>(nodeCollection);
+        for (Node node : nodeCollection) {
+            if (node == null) {
+                continue;
+            }
+            NodeGraphData.NodeData nodeData = new NodeGraphData.NodeData();
+            nodeData.setId(node.getId());
+            nodeData.setType(node.getType());
+            nodeData.setMode(node.getMode());
+            nodeData.setX(node.getX());
+            nodeData.setY(node.getY());
+
+            List<NodeGraphData.ParameterData> paramDataList = new ArrayList<>();
+            for (NodeParameter param : node.getParameters()) {
+                NodeGraphData.ParameterData paramData = new NodeGraphData.ParameterData();
+                paramData.setName(param.getName());
+                paramData.setValue(param.getStringValue());
+                paramData.setType(param.getType().name());
+                paramDataList.add(paramData);
+            }
+            nodeData.setParameters(paramDataList);
+
+            Node attachedSensor = node.getAttachedSensor();
+            nodeData.setAttachedSensorId(attachedSensor != null && allowed.contains(attachedSensor) ? attachedSensor.getId() : null);
+
+            Node parentControl = node.getParentControl();
+            nodeData.setParentControlId(parentControl != null && allowed.contains(parentControl) ? parentControl.getId() : null);
+
+            Node attachedAction = node.getAttachedActionNode();
+            nodeData.setAttachedActionId(attachedAction != null && allowed.contains(attachedAction) ? attachedAction.getId() : null);
+
+            Node parentActionControl = node.getParentActionControl();
+            nodeData.setParentActionControlId(parentActionControl != null && allowed.contains(parentActionControl) ? parentActionControl.getId() : null);
+
+            List<NodeGraphData.ParameterAttachmentData> attachmentData = new ArrayList<>();
+            Map<Integer, Node> attachedParameters = node.getAttachedParameters();
+            if (attachedParameters != null && !attachedParameters.isEmpty()) {
+                List<Integer> slotIndices = new ArrayList<>(attachedParameters.keySet());
+                Collections.sort(slotIndices);
+                for (Integer slotIndex : slotIndices) {
+                    Node parameterNode = attachedParameters.get(slotIndex);
+                    if (parameterNode != null && allowed.contains(parameterNode)) {
+                        attachmentData.add(new NodeGraphData.ParameterAttachmentData(slotIndex, parameterNode.getId()));
+                    }
+                }
+            }
+            nodeData.setParameterAttachments(attachmentData);
+            if (!attachmentData.isEmpty()) {
+                nodeData.setAttachedParameterId(attachmentData.get(0).getParameterNodeId());
+            } else {
+                nodeData.setAttachedParameterId(null);
+            }
+
+            Node parentParameterHost = node.getParentParameterHost();
+            nodeData.setParentParameterHostId(parentParameterHost != null && allowed.contains(parentParameterHost) ? parentParameterHost.getId() : null);
+
+            data.getNodes().add(nodeData);
+        }
+
+        if (connectionCollection != null) {
+            for (NodeConnection connection : connectionCollection) {
+                if (connection == null) {
+                    continue;
+                }
+                Node outputNode = connection.getOutputNode();
+                Node inputNode = connection.getInputNode();
+                if (!allowed.contains(outputNode) || !allowed.contains(inputNode)) {
+                    continue;
+                }
+                if (outputNode.isSensorNode() || inputNode.isSensorNode()) {
+                    continue;
+                }
+                NodeGraphData.ConnectionData connData = new NodeGraphData.ConnectionData(
+                    outputNode.getId(),
+                    inputNode.getId(),
+                    connection.getOutputSocket(),
+                    connection.getInputSocket()
+                );
+                data.getConnections().add(connData);
+            }
+        }
+
+        return data;
+    }
+
+    private void pushUndoState() {
+        if (suppressUndoCapture) {
+            return;
+        }
+        NodeGraphData snapshot = buildGraphData(new ArrayList<>(nodes), new ArrayList<>(connections), null);
+        pushUndoSnapshot(snapshot);
+    }
+
+    private void pushUndoSnapshot(NodeGraphData snapshot) {
+        if (snapshot == null || suppressUndoCapture) {
+            return;
+        }
+        undoStack.push(snapshot);
+        while (undoStack.size() > MAX_HISTORY) {
+            undoStack.removeLast();
+        }
+        redoStack.clear();
+    }
+
+    private void restoreFromSnapshot(NodeGraphData data) {
+        if (data == null) {
+            return;
+        }
+        suppressUndoCapture = true;
+        applyLoadedData(data);
+        suppressUndoCapture = false;
+        workspaceDirty = true;
+    }
+
+    public boolean undo() {
+        if (undoStack.isEmpty()) {
+            return false;
+        }
+        NodeGraphData currentState = buildGraphData(new ArrayList<>(nodes), new ArrayList<>(connections), null);
+        NodeGraphData previousState = undoStack.pop();
+        if (currentState != null) {
+            redoStack.push(currentState);
+        }
+        restoreFromSnapshot(previousState);
+        return true;
+    }
+
+    public boolean redo() {
+        if (redoStack.isEmpty()) {
+            return false;
+        }
+        NodeGraphData currentState = buildGraphData(new ArrayList<>(nodes), new ArrayList<>(connections), null);
+        NodeGraphData nextState = redoStack.pop();
+        if (currentState != null) {
+            undoStack.push(currentState);
+        }
+        restoreFromSnapshot(nextState);
+        return true;
+    }
+
+    public void startDragging(Node node, int mouseX, int mouseY) {
+        stopCoordinateEditing(true);
+        stopAmountEditing(true);
+        resetDropTargets();
+
+        if (node == null) {
+            pendingDragUndoSnapshot = null;
+            dragOperationChanged = false;
+            multiDragActive = false;
+            multiDragStartPositions.clear();
+            return;
+        }
+
+        if (suppressUndoCapture) {
+            pendingDragUndoSnapshot = null;
+        } else {
+            pendingDragUndoSnapshot = buildGraphData(new ArrayList<>(nodes), new ArrayList<>(connections), null);
+        }
+        dragOperationChanged = false;
+
+        draggingNode = node;
+        draggingNodeStartX = node.getX();
+        draggingNodeStartY = node.getY();
+        draggingNodeDetached = false;
+        node.setDragging(true);
+
+        if (selectedNodes.size() > 1 && selectedNodes.contains(node)) {
+            multiDragActive = true;
+            multiDragStartPositions.clear();
+            for (Node selected : selectedNodes) {
+                multiDragStartPositions.put(selected, new DragStartInfo(selected.getX(), selected.getY()));
+                if (selected != node) {
+                    selected.setDragging(true);
+                }
+            }
+        } else {
+            multiDragActive = false;
+            multiDragStartPositions.clear();
+        }
+
+        int worldMouseX = screenToWorldX(mouseX);
+        int worldMouseY = screenToWorldY(mouseY);
+        node.setDragOffsetX(worldMouseX - node.getX());
+        node.setDragOffsetY(worldMouseY - node.getY());
+    }
+    
+    public void startDraggingConnection(Node node, int socketIndex, boolean isOutput, int mouseX, int mouseY) {
+        stopCoordinateEditing(true);
+        stopAmountEditing(true);
+        isDraggingConnection = true;
+        connectionSourceNode = node;
+        connectionSourceSocket = socketIndex;
+        isOutputSocket = isOutput;
+        connectionDragX = screenToWorldX(mouseX);
+        connectionDragY = screenToWorldY(mouseY);
+        
+        // Find and disconnect existing connection from this socket
+        disconnectedConnection = null;
+        if (isOutput) {
+            // Dragging from output socket - find connection that starts from this socket
+            for (NodeConnection conn : connections) {
+                if (conn.getOutputNode().equals(node) && conn.getOutputSocket() == socketIndex) {
+                    disconnectedConnection = conn;
+                    connections.remove(conn);
+                    break;
+                }
+            }
+        } else {
+            // Dragging from input socket - find connection that ends at this socket
+            for (NodeConnection conn : connections) {
+                if (conn.getInputNode().equals(node) && conn.getInputSocket() == socketIndex) {
+                    disconnectedConnection = conn;
+                    connections.remove(conn);
+                    break;
+                }
+            }
+        }
+        
+        System.out.println("Started dragging connection from " + (isOutput ? "output" : "input") + 
+                         " socket " + socketIndex + " of node " + node.getType() + 
+                         (disconnectedConnection != null ? " (disconnected existing connection)" : ""));
+    }
+
+    public void updateDrag(int mouseX, int mouseY) {
+        int worldMouseX = screenToWorldX(mouseX);
+        int worldMouseY = screenToWorldY(mouseY);
+
+        if (draggingNode != null) {
+            int newX = worldMouseX - draggingNode.getDragOffsetX();
+            int newY = worldMouseY - draggingNode.getDragOffsetY();
+
+            if (multiDragActive) {
+                int deltaX = newX - draggingNodeStartX;
+                int deltaY = newY - draggingNodeStartY;
+                if (deltaX != 0 || deltaY != 0) {
+                    dragOperationChanged = true;
+                }
+                draggingNode.setPosition(newX, newY);
+                for (Map.Entry<Node, DragStartInfo> entry : multiDragStartPositions.entrySet()) {
+                    Node member = entry.getKey();
+                    if (member == null || member == draggingNode) {
+                        continue;
+                    }
+                    DragStartInfo start = entry.getValue();
+                    if (start == null) {
+                        continue;
+                    }
+                    member.setPosition(start.x + deltaX, start.y + deltaY);
+                }
+                draggingNode.setSocketsHidden(false);
+                resetDropTargets();
+            } else {
+                if (!draggingNodeDetached) {
+                    if (newX != draggingNodeStartX || newY != draggingNodeStartY) {
+                        detachDraggingNodeFromParents();
+                    }
+                }
+
+                if (draggingNodeDetached) {
+                    int currentX = draggingNode.getX();
+                    int currentY = draggingNode.getY();
+                    if (currentX != newX || currentY != newY) {
+                        dragOperationChanged = true;
+                    }
+                    draggingNode.setPosition(newX, newY);
+
+                    boolean hideSockets = false;
+                    if (draggingNode.isSensorNode()) {
+                        resetDropTargets();
+                        for (Node node : nodes) {
+                            if (!node.canAcceptSensor() || node == draggingNode) {
+                                continue;
+                            }
+                            if (node.isPointInsideSensorSlot(worldMouseX, worldMouseY)) {
+                                sensorDropTarget = node;
+                                hideSockets = true;
+                                break;
+                            }
+                        }
+                    } else if (draggingNode.isParameterNode()) {
+                        resetDropTargets();
+                        for (Node node : nodes) {
+                            if (!node.canAcceptParameter() || node == draggingNode) {
+                                continue;
+                            }
+                            int slotIndex = node.getParameterSlotIndexAt(worldMouseX, worldMouseY);
+                            if (slotIndex >= 0 && node.canAcceptParameterNode(draggingNode, slotIndex)) {
+                                parameterDropTarget = node;
+                                parameterDropSlotIndex = slotIndex;
+                                hideSockets = true;
+                                break;
+                            }
+                        }
+                    } else {
+                        resetDropTargets();
+                        for (Node node : nodes) {
+                            if (!node.canAcceptActionNode() || node == draggingNode) {
+                                continue;
+                            }
+                            if (!node.canAcceptActionNode(draggingNode)) {
+                                continue;
+                            }
+                            if (node.isPointInsideActionSlot(worldMouseX, worldMouseY)) {
+                                actionDropTarget = node;
+                                hideSockets = true;
+                                break;
+                            }
+                        }
+                    }
+                    draggingNode.setSocketsHidden(hideSockets);
+                }
+            }
+        }
+        if (isDraggingConnection) {
+            connectionDragX = worldMouseX;
+            connectionDragY = worldMouseY;
+
+            // Check for socket snapping
+            hoveredNode = null;
+            hoveredSocket = -1;
+
+            for (Node node : nodes) {
+                if (node == connectionSourceNode) continue;
+                if (!node.shouldRenderSockets()) continue;
+
+                // Check input sockets if dragging from output
+                if (isOutputSocket) {
+                    for (int i = 0; i < node.getInputSocketCount(); i++) {
+                        if (node.isSocketClicked(worldMouseX, worldMouseY, i, true)) {
+                            hoveredNode = node;
+                            hoveredSocket = i;
+                            hoveredSocketIsInput = true;
+                            break;
+                        }
+                    }
+                } else {
+                    // Check output sockets if dragging from input
+                    for (int i = 0; i < node.getOutputSocketCount(); i++) {
+                        if (node.isSocketClicked(worldMouseX, worldMouseY, i, false)) {
+                            hoveredNode = node;
+                            hoveredSocket = i;
+                            hoveredSocketIsInput = false;
+                            break;
+                        }
+                    }
+                }
+                
+                if (hoveredNode != null) break;
+            }
+        }
+    }
+
+    public void previewSidebarDrag(NodeType nodeType, int worldMouseX, int worldMouseY) {
+        resetDropTargets();
+        if (nodeType == null) {
+            return;
+        }
+
+        if (Node.isSensorType(nodeType)) {
+            for (Node node : nodes) {
+                if (!node.canAcceptSensor()) {
+                    continue;
+                }
+                if (node.isPointInsideSensorSlot(worldMouseX, worldMouseY)) {
+                    sensorDropTarget = node;
+                    break;
+                }
+            }
+        } else if (Node.isParameterType(nodeType)) {
+            Node parameterCandidate = new Node(nodeType, worldMouseX, worldMouseY);
+            for (Node node : nodes) {
+                if (!node.canAcceptParameter()) {
+                    continue;
+                }
+                int slotIndex = node.getParameterSlotIndexAt(worldMouseX, worldMouseY);
+                if (slotIndex >= 0 && node.canAcceptParameterNode(parameterCandidate, slotIndex)) {
+                    parameterDropTarget = node;
+                    parameterDropSlotIndex = slotIndex;
+                    break;
+                }
+            }
+        } else {
+            Node candidate = new Node(nodeType, worldMouseX, worldMouseY);
+            for (Node node : nodes) {
+                if (!node.canAcceptActionNode()) {
+                    continue;
+                }
+                if (!node.canAcceptActionNode(candidate)) {
+                    continue;
+                }
+                if (node.isPointInsideActionSlot(worldMouseX, worldMouseY)) {
+                    actionDropTarget = node;
+                    break;
+                }
+            }
+        }
+    }
+
+    public Node handleSidebarDrop(NodeType nodeType, int worldMouseX, int worldMouseY) {
+        resetDropTargets();
+        if (nodeType == null) {
+            return null;
+        }
+
+        Node newNode = new Node(nodeType, 0, 0);
+
+        if (Node.isSensorType(nodeType)) {
+            for (Node node : nodes) {
+                if (!node.canAcceptSensor()) {
+                    continue;
+                }
+                if (node.isPointInsideSensorSlot(worldMouseX, worldMouseY)) {
+                    nodes.add(newNode);
+                    node.attachSensor(newNode);
+                    workspaceDirty = true;
+                    return newNode;
+                }
+            }
+        } else if (Node.isParameterType(nodeType)) {
+            for (Node node : nodes) {
+                if (!node.canAcceptParameter()) {
+                    continue;
+                }
+                int slotIndex = node.getParameterSlotIndexAt(worldMouseX, worldMouseY);
+                if (slotIndex >= 0 && node.canAcceptParameterNode(newNode, slotIndex)) {
+                    nodes.add(newNode);
+                    node.attachParameter(newNode, slotIndex);
+                    workspaceDirty = true;
+                    return newNode;
+                }
+            }
+        } else {
+            for (Node node : nodes) {
+                if (!node.canAcceptActionNode()) {
+                    continue;
+                }
+                if (!node.canAcceptActionNode(newNode)) {
+                    continue;
+                }
+                if (node.isPointInsideActionSlot(worldMouseX, worldMouseY)) {
+                    nodes.add(newNode);
+                    node.attachActionNode(newNode);
+                    workspaceDirty = true;
+                    return newNode;
+                }
+            }
+        }
+
+        int nodeX = worldMouseX - newNode.getWidth() / 2;
+        int nodeY = worldMouseY - newNode.getHeight() / 2;
+        newNode.setPosition(nodeX, nodeY);
+        nodes.add(newNode);
+        workspaceDirty = true;
+        return newNode;
+    }
+    
+    public void updateMouseHover(int mouseX, int mouseY) {
+        // Reset hover state
+        hoveredSocketNode = null;
+        hoveredSocketIndex = -1;
+        hoveringStartButton = false;
+        hoveredStartNode = null;
+
+        // Check for start button hover
+        for (Node node : nodes) {
+            if (node.getType() == NodeType.START && isMouseOverStartButton(node, mouseX, mouseY)) {
+                hoveringStartButton = true;
+                hoveredStartNode = node;
+                break;
+            }
+        }
+        
+        // Don't check for socket hover if we're currently dragging a connection
+        if (isDraggingConnection) {
+            return;
+        }
+
+        int worldMouseX = screenToWorldX(mouseX);
+        int worldMouseY = screenToWorldY(mouseY);
+
+        // Check for socket hover
+        for (Node node : nodes) {
+            if (!node.shouldRenderSockets()) {
+                continue;
+            }
+            // Check input sockets
+            for (int i = 0; i < node.getInputSocketCount(); i++) {
+                if (node.isSocketClicked(worldMouseX, worldMouseY, i, true)) {
+                    hoveredSocketNode = node;
+                    hoveredSocketIndex = i;
+                    hoveredSocketIsInput = true;
+                    return;
+                }
+            }
+
+            // Check output sockets
+            for (int i = 0; i < node.getOutputSocketCount(); i++) {
+                if (node.isSocketClicked(worldMouseX, worldMouseY, i, false)) {
+                    hoveredSocketNode = node;
+                    hoveredSocketIndex = i;
+                    hoveredSocketIsInput = false;
+                    return;
+                }
+            }
+        }
+    }
+
+    public void stopDragging() {
+        Node rootToPromote = null;
+        if (draggingNode != null) {
+            Node node = draggingNode;
+            if (multiDragActive) {
+                for (Node member : multiDragStartPositions.keySet()) {
+                    if (member != null) {
+                        member.setDragging(false);
+                        member.setSocketsHidden(false);
+                    }
+                }
+                rootToPromote = getRootNode(node);
+            } else if (node.isSensorNode() && sensorDropTarget != null) {
+                Node target = sensorDropTarget;
+                node.setDragging(false);
+                if (!target.attachSensor(node)) {
+                    node.setSocketsHidden(false);
+                }
+                rootToPromote = getRootNode(target);
+            } else if (node.isParameterNode() && parameterDropTarget != null && parameterDropSlotIndex != null) {
+                Node target = parameterDropTarget;
+                int slotIndex = parameterDropSlotIndex;
+                node.setDragging(false);
+                if (!target.attachParameter(node, slotIndex)) {
+                    node.setSocketsHidden(false);
+                }
+                rootToPromote = getRootNode(target);
+            } else if (!node.isSensorNode() && actionDropTarget != null) {
+                Node target = actionDropTarget;
+                node.setDragging(false);
+                if (!target.attachActionNode(node)) {
+                    node.setSocketsHidden(false);
+                }
+                rootToPromote = getRootNode(target);
+            } else {
+                node.setDragging(false);
+                node.setSocketsHidden(false);
+                rootToPromote = getRootNode(node);
+            }
+        }
+        if (rootToPromote != null) {
+            bringNodeToFront(rootToPromote);
+        }
+        draggingNode = null;
+        draggingNodeDetached = false;
+        resetDropTargets();
+
+        if (dragOperationChanged) {
+            pushUndoSnapshot(pendingDragUndoSnapshot);
+            workspaceDirty = true;
+        }
+        pendingDragUndoSnapshot = null;
+        dragOperationChanged = false;
+        if (multiDragActive) {
+            multiDragActive = false;
+            multiDragStartPositions.clear();
+        }
+        selectionDeletionPreviewActive = false;
+    }
+
+    private void detachDraggingNodeFromParents() {
+        if (draggingNode == null || draggingNodeDetached) {
+            return;
+        }
+
+        if (draggingNode.isSensorNode() && draggingNode.isAttachedToControl()) {
+            Node parent = draggingNode.getParentControl();
+            if (parent != null) {
+                parent.detachSensor();
+            }
+        }
+
+        if (draggingNode.isAttachedToActionControl()) {
+            Node parent = draggingNode.getParentActionControl();
+            if (parent != null) {
+                parent.detachActionNode();
+            }
+        }
+
+        if (draggingNode.isParameterNode() && draggingNode.getParentParameterHost() != null) {
+            Node parent = draggingNode.getParentParameterHost();
+            if (parent != null) {
+                parent.detachParameter(draggingNode.getParentParameterSlotIndex());
+            }
+        }
+
+        draggingNodeDetached = true;
+        dragOperationChanged = true;
+    }
+    
+    public void stopDraggingConnection() {
+        if (isDraggingConnection && connectionSourceNode != null) {
+            // Try to create connection if hovering over valid socket
+            if (hoveredNode != null && hoveredSocket != -1) {
+                if (isOutputSocket && hoveredSocketIsInput) {
+                    // Remove any existing incoming connection to the target socket
+                    connections.removeIf(conn ->
+                        conn.getInputNode() == hoveredNode && conn.getInputSocket() == hoveredSocket
+                    );
+
+                    // Ensure only one outgoing connection per source socket
+                    connections.removeIf(conn ->
+                        conn.getOutputNode() == connectionSourceNode && conn.getOutputSocket() == connectionSourceSocket
+                    );
+
+                    // Connect output to input
+                    NodeConnection newConnection = new NodeConnection(connectionSourceNode, hoveredNode, connectionSourceSocket, hoveredSocket);
+                    connections.add(newConnection);
+                    System.out.println("Created new connection from " + connectionSourceNode.getType() + " to " + hoveredNode.getType());
+                } else if (!isOutputSocket && !hoveredSocketIsInput) {
+                    // Remove any existing outgoing connection from the target socket
+                    connections.removeIf(conn -> 
+                        conn.getOutputNode() == hoveredNode && conn.getOutputSocket() == hoveredSocket
+                    );
+                    
+                    // Connect input to output (reverse connection)
+                    NodeConnection newConnection = new NodeConnection(hoveredNode, connectionSourceNode, hoveredSocket, connectionSourceSocket);
+                    connections.add(newConnection);
+                    System.out.println("Created new connection from " + hoveredNode.getType() + " to " + connectionSourceNode.getType());
+                } else {
+                    // Invalid connection - restore original
+                    if (disconnectedConnection != null) {
+                        connections.add(disconnectedConnection);
+                        System.out.println("Restored original connection (invalid target)");
+                    }
+                }
+            } else {
+                // No valid target - restore original connection
+                if (disconnectedConnection != null) {
+                    connections.add(disconnectedConnection);
+                    System.out.println("Restored original connection (no target)");
+                }
+            }
+        }
+        
+        isDraggingConnection = false;
+        connectionSourceNode = null;
+        connectionSourceSocket = -1;
+        hoveredNode = null;
+        hoveredSocket = -1;
+        disconnectedConnection = null;
+    }
+    
+    public boolean isInSidebar(int mouseX, int sidebarWidth) {
+        return mouseX < sidebarWidth;
+    }
+    
+    public boolean isAnyNodeBeingDragged() {
+        return draggingNode != null || isDraggingConnection;
+    }
+    
+    public void startPanning(int mouseX, int mouseY) {
+        isPanning = true;
+        panStartX = mouseX;
+        panStartY = mouseY;
+        panStartCameraX = cameraX;
+        panStartCameraY = cameraY;
+    }
+    
+    public void updatePanning(int mouseX, int mouseY) {
+        if (isPanning) {
+            int deltaX = mouseX - panStartX;
+            int deltaY = mouseY - panStartY;
+            float scale = getZoomScale();
+            if (scale == 0.0f) {
+                scale = 1.0f;
+            }
+            cameraX = panStartCameraX - Math.round(deltaX / scale); // Flip horizontal panning
+            cameraY = panStartCameraY - Math.round(deltaY / scale); // Flip vertical panning
+        }
+    }
+    
+    public void stopPanning() {
+        isPanning = false;
+    }
+    
+    public boolean isPanning() {
+        return isPanning;
+    }
+    
+    public void resetCamera() {
+        cameraX = 0;
+        cameraY = 0;
+    }
+    
+    // Convert screen coordinates to world coordinates
+    public int screenToWorldX(int screenX) {
+        float scale = getZoomScale();
+        if (scale == 0.0f) {
+            scale = 1.0f;
+        }
+        return cameraX + Math.round(screenX / scale);
+    }
+    
+    public int screenToWorldY(int screenY) {
+        float scale = getZoomScale();
+        if (scale == 0.0f) {
+            scale = 1.0f;
+        }
+        return cameraY + Math.round(screenY / scale);
+    }
+    
+    // Convert world coordinates to screen coordinates
+    public int worldToScreenX(int worldX) {
+        return Math.round((worldX - cameraX) * getZoomScale());
+    }
+    
+    public int worldToScreenY(int worldY) {
+        return Math.round((worldY - cameraY) * getZoomScale());
+    }
+    
+    public void deleteNodeIfInSidebar(Node node, int mouseX, int sidebarWidth) {
+        // Use the same logic as the grey-out function - more than halfway over the sidebar
+        // Calculate the node's screen position (same as in renderNode)
+        int nodeScreenX = node.getX() - cameraX;
+        if (isNodeOverSidebar(node, sidebarWidth, nodeScreenX, node.getWidth())) {
+            if (shouldCascadeDelete(node)) {
+                removeNodeCascade(node);
+            } else {
+                removeNode(node);
+            }
+        }
+    }
+
+    private void removeNodeCascade(Node node) {
+        removeNodeCascade(node, true);
+    }
+
+    private void removeNodeCascade(Node node, boolean captureUndo) {
+        if (node == null) {
+            return;
+        }
+        if (captureUndo) {
+            pushUndoState();
+        }
+        List<Node> removalOrder = new ArrayList<>();
+        collectNodesForCascade(node, removalOrder, new HashSet<>());
+        for (Node toRemove : removalOrder) {
+            boolean shouldReconnect = toRemove == node;
+            removeNodeInternal(toRemove, shouldReconnect, false);
+        }
+        workspaceDirty = true;
+    }
+
+    private void collectNodesForCascade(Node node, List<Node> order, Set<Node> visited) {
+        if (node == null || !visited.add(node)) {
+            return;
+        }
+
+        if (node.hasAttachedSensor()) {
+            collectNodesForCascade(node.getAttachedSensor(), order, visited);
+        }
+        if (node.hasAttachedActionNode()) {
+            collectNodesForCascade(node.getAttachedActionNode(), order, visited);
+        }
+        if (node.hasAttachedParameter()) {
+            for (Node parameter : node.getAttachedParameters().values()) {
+                collectNodesForCascade(parameter, order, visited);
+            }
+        }
+
+        order.add(node);
+    }
+
+    private boolean shouldCascadeDelete(Node node) {
+        if (node == null) {
+            return false;
+        }
+        if (node.getType().getCategory() == NodeCategory.LOGIC) {
+            return true;
+        }
+        return node.hasAttachedSensor() || node.hasAttachedActionNode() || node.hasAttachedParameter();
+    }
+    
+    public boolean isNodeOverSidebar(Node node, int sidebarWidth) {
+        if (node == null) {
+            return false;
+        }
+        int screenX = worldToScreenX(node.getX());
+        double scaledCenter = screenX + (node.getWidth() * getZoomScale()) / 2.0;
+        return scaledCenter < sidebarWidth;
+    }
+    
+    public boolean isNodeOverSidebar(Node node, int sidebarWidth, int screenX, int screenWidth) {
+        double scaledCenter = (screenX + screenWidth / 2.0) * getZoomScale();
+        return scaledCenter < sidebarWidth;
+    }
+    
+    public boolean tryConnectToSocket(Node targetNode, int targetSocket, boolean isInput) {
+        if (isDraggingConnection && connectionSourceNode != null) {
+            if (!targetNode.shouldRenderSockets()) {
+                return false;
+            }
+            // Validate connection (output can only connect to input)
+            if (isInput && connectionSourceNode != targetNode) {
+                // Create new connection
+                connections.add(new NodeConnection(connectionSourceNode, targetNode, connectionSourceSocket, targetSocket));
+                stopDraggingConnection();
+                return true;
+            }
+        }
+        return false;
+    }
+    
+    public NodeConnection getConnectionAt(int mouseX, int mouseY) {
+        int worldX = screenToWorldX(mouseX);
+        int worldY = screenToWorldY(mouseY);
+        for (NodeConnection connection : connections) {
+            // Simple check - could be improved with better line collision detection
+            Node outputNode = connection.getOutputNode();
+            Node inputNode = connection.getInputNode();
+
+            int outputX = outputNode.getSocketX(false);
+            int outputY = outputNode.getSocketY(connection.getOutputSocket(), false);
+            int inputX = inputNode.getSocketX(true);
+            int inputY = inputNode.getSocketY(connection.getInputSocket(), true);
+
+            // Check if mouse is near the connection line (simplified)
+            if (Math.abs(worldY - (outputY + inputY) / 2) < 10) {
+                int minX = Math.min(outputX, inputX);
+                int maxX = Math.max(outputX, inputX);
+                if (worldX >= minX && worldX <= maxX) {
+                    return connection;
+                }
+            }
+        }
+        return null;
+    }
+
+    public void render(DrawContext context, TextRenderer textRenderer, int mouseX, int mouseY, float delta, boolean onlyDragged) {
+        var matrices = context.getMatrices();
+        matrices.pushMatrix();
+        matrices.scale(getZoomScale(), getZoomScale());
+
+        if (!onlyDragged) {
+            updateCascadeDeletionPreview();
+            renderConnections(context);
+        }
+
+        Set<Node> processedRoots = new HashSet<>();
+        Set<Node> renderedNodes = new HashSet<>();
+
+        for (Node node : nodes) {
+            Node root = getRootNode(node);
+            if (root == null || processedRoots.contains(root)) {
+                continue;
+            }
+            processedRoots.add(root);
+            renderHierarchy(root, context, textRenderer, mouseX, mouseY, delta, onlyDragged, false, renderedNodes);
+        }
+
+        matrices.popMatrix();
+    }
+
+    public void renderSelectionBox(DrawContext context) {
+        if (!selectionBoxActive || !hasSelectionBoxDrag()) {
+            return;
+        }
+        int left = Math.min(selectionBoxStartX, selectionBoxCurrentX);
+        int right = Math.max(selectionBoxStartX, selectionBoxCurrentX);
+        int top = Math.min(selectionBoxStartY, selectionBoxCurrentY);
+        int bottom = Math.max(selectionBoxStartY, selectionBoxCurrentY);
+        if (left == right || top == bottom) {
+            return;
+        }
+        int fillColor = 0x401AA3FF;
+        int borderColor = 0x801AA3FF;
+        context.fill(left, top, right, bottom, fillColor);
+        context.drawBorder(left, top, right - left, bottom - top, borderColor);
+    }
+
+    private void renderHierarchy(Node node, DrawContext context, TextRenderer textRenderer, int mouseX, int mouseY, float delta, boolean onlyDragged, boolean ancestorActive, Set<Node> renderedNodes) {
+        if (node == null || renderedNodes.contains(node)) {
+            return;
+        }
+
+        boolean ownActive = isHierarchyDragging(node);
+        boolean hierarchyActive = ancestorActive || ownActive;
+        if ((onlyDragged && !hierarchyActive) || (!onlyDragged && hierarchyActive)) {
+            markHierarchyRendered(node, renderedNodes);
+            return;
+        }
+
+        renderNode(context, textRenderer, node, mouseX, mouseY, delta);
+        renderedNodes.add(node);
+
+        Node actionChild = node.getAttachedActionNode();
+        renderHierarchy(actionChild, context, textRenderer, mouseX, mouseY, delta, onlyDragged, hierarchyActive, renderedNodes);
+
+        Node sensorChild = node.getAttachedSensor();
+        renderHierarchy(sensorChild, context, textRenderer, mouseX, mouseY, delta, onlyDragged, hierarchyActive, renderedNodes);
+
+        Map<Integer, Node> parameterMap = node.getAttachedParameters();
+        if (parameterMap != null && !parameterMap.isEmpty()) {
+            List<Integer> keys = new ArrayList<>(parameterMap.keySet());
+            Collections.sort(keys);
+            for (Integer key : keys) {
+                renderHierarchy(parameterMap.get(key), context, textRenderer, mouseX, mouseY, delta, onlyDragged, hierarchyActive, renderedNodes);
+            }
+        }
+    }
+
+    private void markHierarchyRendered(Node node, Set<Node> renderedNodes) {
+        if (node == null || renderedNodes.contains(node)) {
+            return;
+        }
+        renderedNodes.add(node);
+        markHierarchyRendered(node.getAttachedActionNode(), renderedNodes);
+        markHierarchyRendered(node.getAttachedSensor(), renderedNodes);
+        Map<Integer, Node> parameterMap = node.getAttachedParameters();
+        if (parameterMap != null && !parameterMap.isEmpty()) {
+            for (Node parameter : parameterMap.values()) {
+                markHierarchyRendered(parameter, renderedNodes);
+            }
+        }
+    }
+
+    private Node getParentForNode(Node node) {
+        if (node == null) {
+            return null;
+        }
+        if (node.isParameterNode()) {
+            return node.getParentParameterHost();
+        }
+        if (node.isSensorNode()) {
+            return node.getParentControl();
+        }
+        if (node.isAttachedToActionControl()) {
+            return node.getParentActionControl();
+        }
+        return null;
+    }
+
+    private boolean isHierarchyDragging(Node node) {
+        return isHierarchyDragging(node, new HashSet<>());
+    }
+
+    private boolean isHierarchyDragging(Node node, Set<Node> visited) {
+        if (node == null || visited.contains(node)) {
+            return false;
+        }
+        visited.add(node);
+        if (node.isDragging()) {
+            return true;
+        }
+        if (isHierarchyDragging(node.getAttachedActionNode(), visited)) {
+            return true;
+        }
+        if (isHierarchyDragging(node.getAttachedSensor(), visited)) {
+            return true;
+        }
+        Map<Integer, Node> parameterMap = node.getAttachedParameters();
+        if (parameterMap != null && !parameterMap.isEmpty()) {
+            for (Node parameter : parameterMap.values()) {
+                if (isHierarchyDragging(parameter, visited)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private void renderNode(DrawContext context, TextRenderer textRenderer, Node node, int mouseX, int mouseY, float delta) {
+        int x = node.getX() - cameraX;
+        int y = node.getY() - cameraY;
+        int width = node.getWidth();
+        int height = node.getHeight();
+
+        // Check if node is being dragged over sidebar (grey-out effect)
+        // Use screen coordinates (with camera offset) for this check
+        boolean isOverSidebar = node.isDragging() && isNodeOverSidebar(node, sidebarWidthForRendering, x, width);
+        if (!isOverSidebar && selectionDeletionPreviewActive && node.isSelected()) {
+            isOverSidebar = true;
+        }
+        if (!isOverSidebar && cascadeDeletionPreviewNodes.contains(node)) {
+            isOverSidebar = true;
+        }
+
+        // Node background
+        int bgColor = node.isSelected() ? 0xFF404040 : 0xFF2A2A2A;
+        if (isOverSidebar) {
+            bgColor = 0xFF333333; // Grey when over sidebar for deletion
+        }
+        context.fill(x, y, x + width, y + height, bgColor);
+        
+        // Node border - use light blue for selection, grey for dragging, darker node type color for START/events, node type color otherwise
+        int borderColor;
+        if (node.isDragging()) {
+            borderColor = 0xFFAAAAAA; // Medium grey outline when dragging
+        } else if (node.isSelected()) {
+            borderColor = 0xFF87CEEB; // Light blue selection
+        } else if (node.getType() == NodeType.START) {
+            borderColor = isOverSidebar ? 0xFF2D4A2D : 0xFF2E7D32; // Darker green for START
+        } else if (node.getType() == NodeType.EVENT_FUNCTION) {
+            borderColor = isOverSidebar ? 0xFF5C2C44 : 0xFFAD1457; // Darker pink for event functions
+        } else {
+            borderColor = node.getType().getColor(); // Regular node type color
+        }
+        if (isOverSidebar && node.getType() != NodeType.START && !node.isDragging()) {
+            borderColor = 0xFF555555; // Darker grey border when over sidebar (for regular nodes)
+        }
+        context.drawBorder(x, y, width, height, borderColor);
+
+        // Node header (only for non-START/event function nodes)
+        if (node.getType() != NodeType.START && node.getType() != NodeType.EVENT_FUNCTION) {
+            int headerColor = node.getType().getColor() & 0x80FFFFFF;
+            if (isOverSidebar) {
+                headerColor = 0x80555555; // Grey header when over sidebar
+            }
+            context.fill(x + 1, y + 1, x + width - 1, y + 14, headerColor);
+            
+            // Node title
+            int titleColor = isOverSidebar ? 0xFF888888 : 0xFFFFFFFF; // Grey text when over sidebar
+            drawNodeText(
+                context,
+                textRenderer,
+                node.getDisplayName(),
+                x + 4,
+                y + 4,
+                titleColor
+            );
+        }
+        
+        if (node.shouldRenderSockets()) {
+            // Render input sockets
+            for (int i = 0; i < node.getInputSocketCount(); i++) {
+                boolean isHovered = (hoveredSocketNode == node && hoveredSocketIndex == i && hoveredSocketIsInput);
+                int socketColor = isHovered ? 0xFF87CEEB : node.getType().getColor(); // Light blue when hovered
+                if (isOverSidebar) {
+                    socketColor = 0xFF666666; // Grey sockets when over sidebar
+                }
+                renderSocket(context, node.getSocketX(true) - cameraX, node.getSocketY(i, true) - cameraY, true, socketColor);
+            }
+
+            // Render output sockets
+            for (int i = 0; i < node.getOutputSocketCount(); i++) {
+                boolean isHovered = (hoveredSocketNode == node && hoveredSocketIndex == i && !hoveredSocketIsInput);
+                int socketColor = isHovered ? 0xFF87CEEB : node.getOutputSocketColor(i);
+                if (isOverSidebar) {
+                    socketColor = 0xFF666666; // Grey sockets when over sidebar
+                }
+                renderSocket(context, node.getSocketX(false) - cameraX, node.getSocketY(i, false) - cameraY, false, socketColor);
+            }
+        }
+
+        // Render node content based on type
+        if (node.getType() == NodeType.START) {
+            // START node - green square with play button
+            int greenColor = isOverSidebar ? 0xFF4A5D23 : 0xFF4CAF50; // Darker green when over sidebar
+            context.fill(x + 1, y + 1, x + width - 1, y + height - 1, greenColor);
+            
+            // Draw play button (triangle pointing right) - with hover effect
+            int playColor;
+            if (hoveringStartButton) {
+                playColor = isOverSidebar ? 0xFFCCCCCC : 0xFFE0E0E0; // Darker when hovered
+            } else {
+                playColor = isOverSidebar ? 0xFFE0E0E0 : 0xFFFFFFFF; // Normal white
+            }
+            int centerX = x + width / 2;
+            int centerY = y + height / 2;
+            
+            // Play triangle (pointing right) - bigger and cleaner
+            int triangleSize = 10; // Bigger triangle
+            int offset = 1; // Slight right offset for centering
+            
+            // Draw triangle using a cleaner algorithm
+            for (int i = 0; i < triangleSize; i++) {
+                int lineWidth = i + 1; // Each line gets progressively wider
+                int startX = centerX - triangleSize/2 + offset;
+                int lineY = centerY - triangleSize/2 + i;
+                
+                if (lineY >= y + 2 && lineY <= y + height - 3) {
+                    context.drawHorizontalLine(startX, startX + lineWidth, lineY, playColor);
+                }
+            }
+            
+        } else if (node.getType() == NodeType.EVENT_FUNCTION) {
+            int baseColor = isOverSidebar ? 0xFF5C2C44 : 0xFFE91E63;
+            context.fill(x + 1, y + 1, x + width - 1, y + height - 1, baseColor);
+
+            int titleColor = isOverSidebar ? 0xFFE3BBCB : 0xFFFFF5F8;
+            drawNodeText(
+                context,
+                textRenderer,
+                Text.literal("Function"),
+                x + 6,
+                y + 4,
+                titleColor
+            );
+
+            int boxLeft = x + 6;
+            int boxRight = x + width - 6;
+            int boxHeight = 16;
+            int boxTop = y + height / 2 - boxHeight / 2 + 4;
+            int boxBottom = boxTop + boxHeight;
+            int inputBackground = isOverSidebar ? 0xFF2E2E2E : 0xFF1F1F1F;
+            context.fill(boxLeft, boxTop, boxRight, boxBottom, inputBackground);
+            int inputBorder = isOverSidebar ? 0xFF6A3A50 : 0xFF000000;
+            context.drawBorder(boxLeft, boxTop, boxRight - boxLeft, boxHeight, inputBorder);
+
+            NodeParameter nameParam = node.getParameter("Name");
+            String value = nameParam != null ? nameParam.getDisplayValue() : "";
+            String display = value.isEmpty() ? "enter name" : value;
+            display = trimTextToWidth(display, textRenderer, boxRight - boxLeft - 8);
+            int textY = boxTop + (boxHeight - textRenderer.fontHeight) / 2 + 1;
+            int textColor = isOverSidebar ? 0xFFBFA1AF : 0xFFFFEEF5;
+            drawNodeText(
+                context,
+                textRenderer,
+                Text.literal(display),
+                boxLeft + 4,
+                textY,
+                textColor
+            );
+        } else if (node.getType() == NodeType.EVENT_CALL) {
+            int baseColor = isOverSidebar ? 0xFF423345 : 0xFFD81B60;
+            context.fill(x + 1, y + 1, x + width - 1, y + height - 1, baseColor);
+
+            int titleColor = isOverSidebar ? 0xFFE3BBCB : 0xFFFFF5F8;
+            drawNodeText(
+                context,
+                textRenderer,
+                Text.literal("Call Function"),
+                x + 6,
+                y + 4,
+                titleColor
+            );
+
+            int boxLeft = x + 6;
+            int boxRight = x + width - 6;
+            int boxHeight = 16;
+            int boxTop = y + height / 2 - boxHeight / 2 + 2;
+            int boxBottom = boxTop + boxHeight;
+            int inputBackground = isOverSidebar ? 0xFF2E2E2E : 0xFF1F1F1F;
+            context.fill(boxLeft, boxTop, boxRight, boxBottom, inputBackground);
+            int inputBorder = isOverSidebar ? 0xFF51323E : 0xFF000000;
+            context.drawBorder(boxLeft, boxTop, boxRight - boxLeft, boxHeight, inputBorder);
+
+            NodeParameter nameParam = node.getParameter("Name");
+            String value = nameParam != null ? nameParam.getDisplayValue() : "";
+            String display = value.isEmpty() ? "enter name" : value;
+            display = trimTextToWidth(display, textRenderer, boxRight - boxLeft - 8);
+            int textY = boxTop + (boxHeight - textRenderer.fontHeight) / 2 + 1;
+            int textColor = isOverSidebar ? 0xFFBFA1AF : 0xFFFFEEF5;
+            drawNodeText(
+                context,
+                textRenderer,
+                Text.literal(display),
+                boxLeft + 4,
+                textY,
+                textColor
+            );
+        } else {
+            if (node.isParameterNode()) {
+                if (shouldShowParameters(node)) {
+                    int paramBgColor = isOverSidebar ? 0xFF2A2A2A : 0xFF1A1A1A; // Grey when over sidebar
+                    context.fill(x + 3, y + 16, x + width - 3, y + height - 3, paramBgColor);
+
+                    // Render parameters
+                    int paramY = y + 18;
+                    List<NodeParameter> parameters = node.getParameters();
+
+                    if (node.supportsModeSelection()) {
+                        String modeLabel = trimTextToWidth(node.getModeDisplayLabel(), textRenderer, width - 10);
+                        int paramTextColor = isOverSidebar ? 0xFF888888 : 0xFFE0E0E0; // Grey text when over sidebar
+                        drawNodeText(
+                            context,
+                            textRenderer,
+                            Text.literal(modeLabel),
+                            x + 5,
+                            paramY,
+                            paramTextColor
+                        );
+                        paramY += 10;
+                    }
+
+                    for (NodeParameter param : parameters) {
+                        String displayText = node.getParameterLabel(param);
+                        displayText = trimTextToWidth(displayText, textRenderer, width - 10);
+
+                        int paramTextColor = isOverSidebar ? 0xFF888888 : 0xFFE0E0E0; // Grey text when over sidebar
+                        drawNodeText(
+                            context,
+                            textRenderer,
+                            displayText,
+                            x + 5,
+                            paramY,
+                            paramTextColor
+                        );
+                        paramY += 10;
+                    }
+                }
+            } else {
+                if (node.hasParameterSlot()) {
+                    int slotCount = node.getParameterSlotCount();
+                    for (int slotIndex = 0; slotIndex < slotCount; slotIndex++) {
+                        renderParameterSlot(context, textRenderer, node, isOverSidebar, slotIndex);
+                    }
+                    if (node.hasCoordinateInputFields()) {
+                        renderCoordinateInputFields(context, textRenderer, node, isOverSidebar);
+                    }
+                    if (node.hasAmountInputField()) {
+                        renderAmountInputField(context, textRenderer, node, isOverSidebar);
+                    }
+                }
+            }
+
+            if (node.hasSensorSlot()) {
+                renderSensorSlot(context, textRenderer, node, isOverSidebar);
+            }
+            if (node.hasActionSlot()) {
+                renderActionSlot(context, textRenderer, node, isOverSidebar);
+            }
+        }
+    }
+
+    private void renderSensorSlot(DrawContext context, TextRenderer textRenderer, Node node, boolean isOverSidebar) {
+        int slotX = node.getSensorSlotLeft() - cameraX;
+        int slotY = node.getSensorSlotTop() - cameraY;
+        int slotWidth = node.getSensorSlotWidth();
+        int slotHeight = node.getSensorSlotHeight();
+
+        int backgroundColor = node.hasAttachedSensor() ? 0xFF262626 : 0xFF1E1E1E;
+        if (isOverSidebar) {
+            backgroundColor = 0xFF2E2E2E;
+        }
+
+        int borderColor = node.hasAttachedSensor() ? 0xFF666666 : 0xFF444444;
+        if (sensorDropTarget == node) {
+            backgroundColor = 0xFF21303E;
+            borderColor = 0xFF87CEEB;
+        }
+
+        context.fill(slotX, slotY, slotX + slotWidth, slotY + slotHeight, backgroundColor);
+        context.drawBorder(slotX, slotY, slotWidth, slotHeight, borderColor);
+
+        if (!node.hasAttachedSensor()) {
+            String placeholder = "Drag a sensor here";
+            String display = trimTextToWidth(placeholder, textRenderer, slotWidth - 8);
+            int textWidth = textRenderer.getWidth(display);
+            int textX = slotX + Math.max(4, (slotWidth - textWidth) / 2);
+            int textY = slotY + (slotHeight - textRenderer.fontHeight) / 2;
+            int textColor = sensorDropTarget == node ? 0xFF87CEEB : 0xFF888888;
+            drawNodeText(context, textRenderer, Text.literal(display), textX, textY, textColor);
+        }
+    }
+
+    private void renderActionSlot(DrawContext context, TextRenderer textRenderer, Node node, boolean isOverSidebar) {
+        int slotX = node.getActionSlotLeft() - cameraX;
+        int slotY = node.getActionSlotTop() - cameraY;
+        int slotWidth = node.getActionSlotWidth();
+        int slotHeight = node.getActionSlotHeight();
+
+        int backgroundColor = node.hasAttachedActionNode() ? 0xFF262626 : 0xFF1E1E1E;
+        if (isOverSidebar) {
+            backgroundColor = 0xFF2E2E2E;
+        }
+
+        int borderColor = node.hasAttachedActionNode() ? 0xFF666666 : 0xFF444444;
+        if (actionDropTarget == node) {
+            backgroundColor = 0xFF2E3221;
+            borderColor = 0xFF8BC34A;
+        }
+
+        context.fill(slotX, slotY, slotX + slotWidth, slotY + slotHeight, backgroundColor);
+        context.drawBorder(slotX, slotY, slotWidth, slotHeight, borderColor);
+
+        if (!node.hasAttachedActionNode()) {
+            String placeholder = "Drag a node here";
+            String display = trimTextToWidth(placeholder, textRenderer, slotWidth - 8);
+            int textWidth = textRenderer.getWidth(display);
+            int textX = slotX + Math.max(4, (slotWidth - textWidth) / 2);
+            int textY = slotY + (slotHeight - textRenderer.fontHeight) / 2;
+            int textColor = actionDropTarget == node ? 0xFF8BC34A : 0xFF888888;
+            drawNodeText(context, textRenderer, Text.literal(display), textX, textY, textColor);
+        }
+    }
+
+    private void renderParameterSlot(DrawContext context, TextRenderer textRenderer, Node node, boolean isOverSidebar, int slotIndex) {
+        int slotX = node.getParameterSlotLeft() - cameraX;
+        int slotY = node.getParameterSlotTop(slotIndex) - cameraY;
+        int slotWidth = node.getParameterSlotWidth();
+        int slotHeight = node.getParameterSlotHeight(slotIndex);
+
+        Node parameterNode = node.getAttachedParameter(slotIndex);
+        boolean occupied = parameterNode != null;
+        boolean isDropTarget = parameterDropTarget == node && parameterDropSlotIndex != null && parameterDropSlotIndex == slotIndex;
+
+        int backgroundColor = occupied ? 0xFF262626 : 0xFF1E1E1E;
+        if (isOverSidebar) {
+            backgroundColor = occupied ? 0xFF2E2E2E : 0xFF202020;
+        }
+
+        int borderColor = occupied ? 0xFF666666 : 0xFF444444;
+        if (isDropTarget) {
+            backgroundColor = 0xFF21303E;
+            borderColor = 0xFF87CEEB;
+        }
+
+        context.fill(slotX, slotY, slotX + slotWidth, slotY + slotHeight, backgroundColor);
+        context.drawBorder(slotX, slotY, slotWidth, slotHeight, borderColor);
+
+        String headerText = node.getParameterSlotLabel(slotIndex);
+        int headerColor = isOverSidebar ? 0xFF777777 : 0xFFAAAAAA;
+        int headerY = slotY - textRenderer.fontHeight - 2;
+        if (headerY > node.getY() - cameraY + 14) {
+            drawNodeText(context, textRenderer, Text.literal(headerText), slotX + 2, headerY, headerColor);
+        }
+
+        if (!occupied && isDropTarget) {
+            // Provide a minimal visual cue when dragging to an empty slot without adding text.
+            context.drawBorder(slotX + 2, slotY + 2, slotWidth - 4, slotHeight - 4, 0xFF87CEEB);
+        }
+    }
+
+    private void renderCoordinateInputFields(DrawContext context, TextRenderer textRenderer, Node node, boolean isOverSidebar) {
+        int baseLabelColor = isOverSidebar ? 0xFF777777 : 0xFFAAAAAA;
+        int fieldBackground = isOverSidebar ? 0xFF252525 : 0xFF1A1A1A;
+        int activeFieldBackground = isOverSidebar ? 0xFF2F2F2F : 0xFF242424;
+        int fieldBorder = isOverSidebar ? 0xFF555555 : 0xFF444444;
+        int activeFieldBorder = 0xFF87CEEB;
+        int textColor = isOverSidebar ? 0xFF888888 : 0xFFE0E0E0;
+        int activeTextColor = 0xFFE6F7FF;
+
+        if (isEditingCoordinateField() && coordinateEditingNode == node) {
+            updateCoordinateCaretBlink();
+        }
+
+        int labelTop = node.getCoordinateFieldLabelTop() - cameraY;
+        int labelHeight = node.getCoordinateFieldLabelHeight();
+        int inputTop = node.getCoordinateFieldInputTop() - cameraY;
+        int fieldHeight = node.getCoordinateFieldHeight();
+        int fieldWidth = node.getCoordinateFieldWidth();
+        int spacing = node.getCoordinateFieldSpacing();
+        int startX = node.getCoordinateFieldStartX() - cameraX;
+
+        for (int i = 0; i < COORDINATE_AXES.length; i++) {
+            int fieldX = startX + i * (fieldWidth + spacing);
+
+            boolean editingAxis = isEditingCoordinateField()
+                && coordinateEditingNode == node
+                && coordinateEditingAxis == i;
+
+            String axisLabel = COORDINATE_AXES[i];
+            int labelWidth = textRenderer.getWidth(axisLabel);
+            int labelX = fieldX + Math.max(0, (fieldWidth - labelWidth) / 2);
+            int labelY = labelTop + Math.max(0, (labelHeight - textRenderer.fontHeight) / 2);
+            int labelColor = editingAxis ? 0xFFB8E7FF : baseLabelColor;
+            drawNodeText(context, textRenderer, Text.literal(axisLabel), labelX, labelY, labelColor);
+
+            int inputBottom = inputTop + fieldHeight;
+            int backgroundColor = editingAxis ? activeFieldBackground : fieldBackground;
+            int borderColor = editingAxis ? activeFieldBorder : fieldBorder;
+            int valueColor = editingAxis ? activeTextColor : textColor;
+
+            context.fill(fieldX, inputTop, fieldX + fieldWidth, inputBottom, backgroundColor);
+            context.drawBorder(fieldX, inputTop, fieldWidth, fieldHeight, borderColor);
+
+            String value;
+            if (editingAxis) {
+                value = coordinateEditBuffer;
+            } else {
+                NodeParameter parameter = node.getParameter(axisLabel);
+                value = parameter != null ? parameter.getDisplayValue() : "";
+            }
+
+            String display = editingAxis
+                ? textRenderer.trimToWidth(value, fieldWidth - 6)
+                : trimTextToWidth(value, textRenderer, fieldWidth - 6);
+
+            int textX = fieldX + 3;
+            int textY = inputTop + (fieldHeight - textRenderer.fontHeight) / 2 + 1;
+            drawNodeText(context, textRenderer, Text.literal(display), textX, textY, valueColor);
+
+            if (editingAxis && coordinateCaretVisible) {
+                int caretX = textX + textRenderer.getWidth(display);
+                caretX = Math.min(caretX, fieldX + fieldWidth - 2);
+                context.fill(caretX, inputTop + 2, caretX + 1, inputBottom - 2, 0xFFE6F7FF);
+            }
+        }
+    }
+
+    private void renderAmountInputField(DrawContext context, TextRenderer textRenderer, Node node, boolean isOverSidebar) {
+        int baseLabelColor = isOverSidebar ? 0xFF777777 : 0xFFAAAAAA;
+        int fieldBackground = isOverSidebar ? 0xFF252525 : 0xFF1A1A1A;
+        int activeFieldBackground = isOverSidebar ? 0xFF2F2F2F : 0xFF242424;
+        int fieldBorder = isOverSidebar ? 0xFF555555 : 0xFF444444;
+        int activeFieldBorder = 0xFF87CEEB;
+        int textColor = isOverSidebar ? 0xFF888888 : 0xFFE0E0E0;
+        int activeTextColor = 0xFFE6F7FF;
+
+        boolean editing = isEditingAmountField() && amountEditingNode == node;
+        if (editing) {
+            updateAmountCaretBlink();
+        }
+
+        int labelTop = node.getAmountFieldLabelTop() - cameraY;
+        int labelHeight = node.getAmountFieldLabelHeight();
+        int fieldTop = node.getAmountFieldInputTop() - cameraY;
+        int fieldHeight = node.getAmountFieldHeight();
+        int fieldLeft = node.getAmountFieldLeft() - cameraX;
+        int fieldWidth = node.getAmountFieldWidth();
+
+        int labelY = labelTop + Math.max(0, (labelHeight - textRenderer.fontHeight) / 2);
+        drawNodeText(context, textRenderer, Text.literal("Amount"), fieldLeft + 2, labelY, baseLabelColor);
+
+        int fieldBottom = fieldTop + fieldHeight;
+        int backgroundColor = editing ? activeFieldBackground : fieldBackground;
+        int borderColor = editing ? activeFieldBorder : fieldBorder;
+        int valueColor = editing ? activeTextColor : textColor;
+
+        context.fill(fieldLeft, fieldTop, fieldLeft + fieldWidth, fieldBottom, backgroundColor);
+        context.drawBorder(fieldLeft, fieldTop, fieldWidth, fieldHeight, borderColor);
+
+        String value;
+        if (editing) {
+            value = amountEditBuffer;
+        } else {
+            NodeParameter amountParam = node.getParameter("Amount");
+            value = amountParam != null ? amountParam.getDisplayValue() : "";
+        }
+
+        String display = editing
+            ? textRenderer.trimToWidth(value, fieldWidth - 6)
+            : trimTextToWidth(value, textRenderer, fieldWidth - 6);
+
+        int textX = fieldLeft + 3;
+        int textY = fieldTop + (fieldHeight - textRenderer.fontHeight) / 2 + 1;
+        drawNodeText(context, textRenderer, Text.literal(display), textX, textY, valueColor);
+
+        if (editing && amountCaretVisible) {
+            int caretX = textX + textRenderer.getWidth(display);
+            caretX = Math.min(caretX, fieldLeft + fieldWidth - 2);
+            context.fill(caretX, fieldTop + 2, caretX + 1, fieldBottom - 2, 0xFFE6F7FF);
+        }
+    }
+
+    public boolean isEditingCoordinateField() {
+        return coordinateEditingNode != null && coordinateEditingAxis >= 0;
+    }
+
+    private void updateCoordinateCaretBlink() {
+        long now = System.currentTimeMillis();
+        if (now - coordinateCaretLastToggleTime >= COORDINATE_CARET_BLINK_INTERVAL_MS) {
+            coordinateCaretVisible = !coordinateCaretVisible;
+            coordinateCaretLastToggleTime = now;
+        }
+    }
+
+    private void resetCoordinateCaretBlink() {
+        coordinateCaretVisible = true;
+        coordinateCaretLastToggleTime = System.currentTimeMillis();
+    }
+
+    public int getCoordinateFieldAxisAt(Node node, int screenX, int screenY) {
+        if (node == null || !node.hasCoordinateInputFields()) {
+            return -1;
+        }
+
+        int worldX = screenToWorldX(screenX);
+        int worldY = screenToWorldY(screenY);
+        int inputTop = node.getCoordinateFieldInputTop();
+        int inputBottom = inputTop + node.getCoordinateFieldHeight();
+        if (worldY < inputTop || worldY > inputBottom) {
+            return -1;
+        }
+
+        int startX = node.getCoordinateFieldStartX();
+        int fieldWidth = node.getCoordinateFieldWidth();
+        int spacing = node.getCoordinateFieldSpacing();
+
+        for (int i = 0; i < COORDINATE_AXES.length; i++) {
+            int fieldX = startX + i * (fieldWidth + spacing);
+            if (worldX >= fieldX && worldX <= fieldX + fieldWidth) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    public void startCoordinateEditing(Node node, int axisIndex) {
+        if (node == null || !node.hasCoordinateInputFields() || axisIndex < 0
+            || axisIndex >= COORDINATE_AXES.length) {
+            stopCoordinateEditing(false);
+            return;
+        }
+
+        stopAmountEditing(true);
+
+        if (isEditingCoordinateField()) {
+            if (coordinateEditingNode == node && coordinateEditingAxis == axisIndex) {
+                return;
+            }
+            boolean changed = applyCoordinateEdit();
+            if (changed) {
+                notifyNodeParametersChanged(coordinateEditingNode);
+            }
+        }
+
+        coordinateEditingNode = node;
+        coordinateEditingAxis = axisIndex;
+
+        NodeParameter parameter = getCoordinateParameter(node, axisIndex);
+        coordinateEditBuffer = parameter != null ? parameter.getDisplayValue() : "";
+        coordinateEditOriginalValue = coordinateEditBuffer;
+        resetCoordinateCaretBlink();
+    }
+
+    public void stopCoordinateEditing(boolean commit) {
+        if (!isEditingCoordinateField()) {
+            return;
+        }
+
+        boolean changed = false;
+        if (commit) {
+            changed = applyCoordinateEdit();
+        } else {
+            revertCoordinateEdit();
+        }
+
+        if (commit && changed) {
+            notifyNodeParametersChanged(coordinateEditingNode);
+        }
+
+        coordinateEditingNode = null;
+        coordinateEditingAxis = -1;
+        coordinateEditBuffer = "";
+        coordinateEditOriginalValue = "";
+        coordinateCaretVisible = true;
+    }
+
+    private boolean applyCoordinateEdit() {
+        if (!isEditingCoordinateField()) {
+            return false;
+        }
+        String value = coordinateEditBuffer;
+        if (value == null || value.isEmpty() || "-".equals(value)) {
+            value = "0";
+        }
+        String axisName = COORDINATE_AXES[coordinateEditingAxis];
+        NodeParameter parameter = getCoordinateParameter(coordinateEditingNode, coordinateEditingAxis);
+        String previous = parameter != null ? parameter.getStringValue() : "";
+        coordinateEditingNode.setParameterValueAndPropagate(axisName, value);
+        coordinateEditingNode.recalculateDimensions();
+        return !Objects.equals(previous, value);
+    }
+
+    private void revertCoordinateEdit() {
+        if (!isEditingCoordinateField()) {
+            return;
+        }
+        String axisName = COORDINATE_AXES[coordinateEditingAxis];
+        coordinateEditingNode.setParameterValueAndPropagate(axisName, coordinateEditOriginalValue);
+        coordinateEditingNode.recalculateDimensions();
+    }
+
+    private NodeParameter getCoordinateParameter(Node node, int axisIndex) {
+        if (node == null || axisIndex < 0 || axisIndex >= COORDINATE_AXES.length) {
+            return null;
+        }
+        return node.getParameter(COORDINATE_AXES[axisIndex]);
+    }
+
+    public boolean handleCoordinateKeyPressed(int keyCode, int modifiers) {
+        if (!isEditingCoordinateField()) {
+            return false;
+        }
+
+        switch (keyCode) {
+            case GLFW.GLFW_KEY_BACKSPACE:
+                if (!coordinateEditBuffer.isEmpty()) {
+                    coordinateEditBuffer = coordinateEditBuffer.substring(0, coordinateEditBuffer.length() - 1);
+                    resetCoordinateCaretBlink();
+                }
+                return true;
+            case GLFW.GLFW_KEY_ENTER:
+            case GLFW.GLFW_KEY_KP_ENTER:
+                stopCoordinateEditing(true);
+                return true;
+            case GLFW.GLFW_KEY_ESCAPE:
+                stopCoordinateEditing(true);
+                return true;
+            case GLFW.GLFW_KEY_TAB:
+                Node node = coordinateEditingNode;
+                int direction = (modifiers & GLFW.GLFW_MOD_SHIFT) != 0 ? -1 : 1;
+                int nextAxis = (coordinateEditingAxis + direction + COORDINATE_AXES.length) % COORDINATE_AXES.length;
+                startCoordinateEditing(node, nextAxis);
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    public boolean handleCoordinateCharTyped(char chr, int modifiers, TextRenderer textRenderer) {
+        if (!isEditingCoordinateField()) {
+            return false;
+        }
+
+        if (chr >= '0' && chr <= '9') {
+            int availableWidth = coordinateEditingNode.getCoordinateFieldWidth() - 6;
+            String candidate = coordinateEditBuffer + chr;
+            if (textRenderer.getWidth(candidate) <= availableWidth) {
+                coordinateEditBuffer = candidate;
+                resetCoordinateCaretBlink();
+            }
+            return true;
+        }
+
+        if (chr == '-' && coordinateEditBuffer.isEmpty()) {
+            coordinateEditBuffer = "-";
+            resetCoordinateCaretBlink();
+            return true;
+        }
+
+        return false;
+    }
+
+    public boolean isEditingAmountField() {
+        return amountEditingNode != null;
+    }
+
+    private void updateAmountCaretBlink() {
+        long now = System.currentTimeMillis();
+        if (now - amountCaretLastToggleTime >= COORDINATE_CARET_BLINK_INTERVAL_MS) {
+            amountCaretVisible = !amountCaretVisible;
+            amountCaretLastToggleTime = now;
+        }
+    }
+
+    private void resetAmountCaretBlink() {
+        amountCaretVisible = true;
+        amountCaretLastToggleTime = System.currentTimeMillis();
+    }
+
+    public void startAmountEditing(Node node) {
+        if (node == null || !node.hasAmountInputField()) {
+            stopAmountEditing(false);
+            return;
+        }
+
+        if (isEditingAmountField()) {
+            if (amountEditingNode == node) {
+                return;
+            }
+            boolean changed = applyAmountEdit();
+            if (changed) {
+                notifyNodeParametersChanged(amountEditingNode);
+            }
+        }
+
+        stopCoordinateEditing(true);
+
+        amountEditingNode = node;
+        NodeParameter amountParam = node.getParameter("Amount");
+        amountEditBuffer = amountParam != null ? amountParam.getDisplayValue() : "";
+        amountEditOriginalValue = amountEditBuffer;
+        resetAmountCaretBlink();
+    }
+
+    public void stopAmountEditing(boolean commit) {
+        if (!isEditingAmountField()) {
+            return;
+        }
+
+        boolean changed = false;
+        if (commit) {
+            changed = applyAmountEdit();
+        } else {
+            revertAmountEdit();
+        }
+
+        if (commit && changed) {
+            notifyNodeParametersChanged(amountEditingNode);
+        }
+
+        amountEditingNode = null;
+        amountEditBuffer = "";
+        amountEditOriginalValue = "";
+        amountCaretVisible = true;
+    }
+
+    private boolean applyAmountEdit() {
+        if (!isEditingAmountField()) {
+            return false;
+        }
+
+        String value = amountEditBuffer;
+        if (value == null || value.isEmpty()) {
+            value = amountEditOriginalValue != null && !amountEditOriginalValue.isEmpty()
+                ? amountEditOriginalValue
+                : "0";
+        }
+
+        NodeParameter amountParam = amountEditingNode.getParameter("Amount");
+        String previous = amountParam != null ? amountParam.getStringValue() : "";
+        amountEditingNode.setParameterValueAndPropagate("Amount", value);
+        amountEditingNode.recalculateDimensions();
+        return !Objects.equals(previous, value);
+    }
+
+    private void revertAmountEdit() {
+        if (!isEditingAmountField()) {
+            return;
+        }
+        amountEditingNode.setParameterValueAndPropagate("Amount", amountEditOriginalValue);
+        amountEditingNode.recalculateDimensions();
+    }
+
+    public boolean handleAmountKeyPressed(int keyCode, int modifiers) {
+        if (!isEditingAmountField()) {
+            return false;
+        }
+
+        switch (keyCode) {
+            case GLFW.GLFW_KEY_BACKSPACE:
+                if (!amountEditBuffer.isEmpty()) {
+                    amountEditBuffer = amountEditBuffer.substring(0, amountEditBuffer.length() - 1);
+                    resetAmountCaretBlink();
+                }
+                return true;
+            case GLFW.GLFW_KEY_ENTER:
+            case GLFW.GLFW_KEY_KP_ENTER:
+                stopAmountEditing(true);
+                return true;
+            case GLFW.GLFW_KEY_ESCAPE:
+                stopAmountEditing(true);
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    public boolean handleAmountCharTyped(char chr, int modifiers, TextRenderer textRenderer) {
+        if (!isEditingAmountField()) {
+            return false;
+        }
+
+        if (chr >= '0' && chr <= '9') {
+            int availableWidth = amountEditingNode.getAmountFieldWidth() - 6;
+            String candidate = amountEditBuffer + chr;
+            if (textRenderer.getWidth(candidate) <= availableWidth) {
+                amountEditBuffer = candidate;
+                resetAmountCaretBlink();
+            }
+            return true;
+        }
+
+        return false;
+    }
+
+    public boolean isPointInsideAmountField(Node node, int screenX, int screenY) {
+        if (node == null || !node.hasAmountInputField()) {
+            return false;
+        }
+
+        int worldX = screenToWorldX(screenX);
+        int worldY = screenToWorldY(screenY);
+        int fieldLeft = node.getAmountFieldLeft();
+        int fieldTop = node.getAmountFieldInputTop();
+        int fieldWidth = node.getAmountFieldWidth();
+        int fieldHeight = node.getAmountFieldHeight();
+
+        return worldX >= fieldLeft && worldX <= fieldLeft + fieldWidth
+            && worldY >= fieldTop && worldY <= fieldTop + fieldHeight;
+    }
+
+    private void drawNodeText(DrawContext context, TextRenderer renderer, Text text, int x, int y, int color) {
+        if (!shouldRenderNodeText()) {
+            return;
+        }
+        context.drawTextWithShadow(renderer, text, x, y, color);
+    }
+
+    private void drawNodeText(DrawContext context, TextRenderer renderer, String text, int x, int y, int color) {
+        drawNodeText(context, renderer, Text.literal(text), x, y, color);
+    }
+
+    private String trimTextToWidth(String text, TextRenderer renderer, int maxWidth) {
+        if (renderer.getWidth(text) <= maxWidth) {
+            return text;
+        }
+
+        String ellipsis = "...";
+        int ellipsisWidth = renderer.getWidth(ellipsis);
+        if (ellipsisWidth >= maxWidth) {
+            return ellipsis;
+        }
+
+        String baseText = text;
+        if (baseText.endsWith(ellipsis)) {
+            baseText = baseText.substring(0, baseText.length() - ellipsis.length());
+        }
+
+        StringBuilder builder = new StringBuilder(baseText);
+        while (builder.length() > 0 && renderer.getWidth(builder.toString() + ellipsis) > maxWidth) {
+            builder.setLength(builder.length() - 1);
+        }
+        return builder.append(ellipsis).toString();
+    }
+
+    private void renderSocket(DrawContext context, int x, int y, boolean isInput, int color) {
+        // Socket circle
+        context.fill(x - 3, y - 3, x + 3, y + 3, color);
+        context.drawBorder(x - 3, y - 3, 6, 6, 0xFF000000);
+        
+        // Socket highlight
+        context.fill(x - 1, y - 1, x + 1, y + 1, 0xFFFFFFFF);
+    }
+
+    private void renderConnections(DrawContext context) {
+        ExecutionManager manager = ExecutionManager.getInstance();
+        boolean animateConnections = manager.isExecuting();
+        long animationTimestamp = System.currentTimeMillis();
+
+        for (NodeConnection connection : connections) {
+            Node outputNode = connection.getOutputNode();
+            Node inputNode = connection.getInputNode();
+
+            if (!outputNode.shouldRenderSockets() || !inputNode.shouldRenderSockets()) {
+                continue;
+            }
+
+            int outputX = outputNode.getSocketX(false) - cameraX;
+            int outputY = outputNode.getSocketY(connection.getOutputSocket(), false) - cameraY;
+            int inputX = inputNode.getSocketX(true) - cameraX;
+            int inputY = inputNode.getSocketY(connection.getInputSocket(), true) - cameraY;
+            
+            // Simple bezier-like curve
+            if (animateConnections && manager.shouldAnimateConnection(connection)) {
+                renderAnimatedConnectionCurve(context, outputX, outputY, inputX, inputY,
+                        outputNode.getOutputSocketColor(connection.getOutputSocket()), animationTimestamp);
+            } else {
+                renderConnectionCurve(context, outputX, outputY, inputX, inputY,
+                        outputNode.getOutputSocketColor(connection.getOutputSocket()));
+            }
+        }
+
+        // Render dragging connection if active
+        if (isDraggingConnection && connectionSourceNode != null) {
+            int sourceX = connectionSourceNode.getSocketX(!isOutputSocket) - cameraX;
+            int sourceY = connectionSourceNode.getSocketY(connectionSourceSocket, !isOutputSocket) - cameraY;
+            int targetX = connectionDragX - cameraX;
+            int targetY = connectionDragY - cameraY;
+            
+            
+            // Snap to hovered socket if available
+            if (hoveredNode != null && hoveredSocket != -1) {
+                targetX = hoveredNode.getSocketX(hoveredSocketIsInput) - cameraX;
+                targetY = hoveredNode.getSocketY(hoveredSocket, hoveredSocketIsInput) - cameraY;
+                
+                // Highlight the target socket
+                renderSocket(context, targetX, targetY, hoveredSocketIsInput, 0xFF87CEEB); // Light blue highlight
+            }
+            
+            // Render the dragging connection using the source node's color
+            if (animateConnections) {
+                renderAnimatedConnectionCurve(context, sourceX, sourceY, targetX, targetY,
+                        connectionSourceNode.getOutputSocketColor(connectionSourceSocket), animationTimestamp);
+            } else {
+                renderConnectionCurve(context, sourceX, sourceY, targetX, targetY,
+                        connectionSourceNode.getOutputSocketColor(connectionSourceSocket));
+            }
+        }
+    }
+
+    private void renderAnimatedConnectionCurve(DrawContext context, int x1, int y1, int x2, int y2, int color, long timestamp) {
+        int midX = x1 + (x2 - x1) / 2;
+
+        int firstSegmentLength = Math.abs(midX - x1);
+        int secondSegmentLength = Math.abs(y2 - y1);
+
+        int animationOffset = (int) ((timestamp / CONNECTION_ANIMATION_STEP_MS) % CONNECTION_DOT_SPACING);
+
+        drawAnimatedSegment(context, x1, y1, midX, y1, true, color, animationOffset, 0);
+        drawAnimatedSegment(context, midX, y1, midX, y2, false, color, animationOffset, firstSegmentLength);
+        drawAnimatedSegment(context, midX, y2, x2, y2, true, color, animationOffset,
+                firstSegmentLength + secondSegmentLength);
+    }
+
+    private void drawAnimatedSegment(DrawContext context, int x1, int y1, int x2, int y2, boolean horizontal,
+                                     int color, int animationOffset, int distanceOffset) {
+        int length = horizontal ? Math.abs(x2 - x1) : Math.abs(y2 - y1);
+        if (length == 0) {
+            return;
+        }
+
+        int direction = horizontal ? Integer.compare(x2, x1) : Integer.compare(y2, y1);
+        int start = horizontal ? x1 : y1;
+        int staticCoord = horizontal ? y1 : x1;
+
+        int initialOffset = mod(distanceOffset - animationOffset, CONNECTION_DOT_SPACING);
+        int stepStart = (CONNECTION_DOT_SPACING - initialOffset) % CONNECTION_DOT_SPACING;
+
+        int position = stepStart;
+        while (position > 0) {
+            position -= CONNECTION_DOT_SPACING;
+        }
+
+        boolean drewSegment = false;
+
+        for (; position <= length; position += CONNECTION_DOT_SPACING) {
+            int minDistance = Math.max(position, 0);
+            int maxDistance = Math.min(position + CONNECTION_DOT_LENGTH - 1, length);
+            if (maxDistance < 0 || minDistance > length || minDistance > maxDistance) {
+                continue;
+            }
+
+            drewSegment = true;
+
+            int startPos = start + minDistance * direction;
+            int endPos = start + maxDistance * direction;
+
+            if (horizontal) {
+                int minX = Math.min(startPos, endPos);
+                int maxX = Math.max(startPos, endPos);
+                context.drawHorizontalLine(minX, maxX, staticCoord, color);
+            } else {
+                int minY = Math.min(startPos, endPos);
+                int maxY = Math.max(startPos, endPos);
+                context.drawVerticalLine(staticCoord, minY, maxY, color);
+            }
+        }
+
+        if (!drewSegment) {
+            int fallbackLength = Math.min(CONNECTION_DOT_LENGTH, length);
+            int minDistance = Math.max(0, length - fallbackLength);
+            int maxDistance = length;
+            int startPos = start + minDistance * direction;
+            int endPos = start + maxDistance * direction;
+
+            if (horizontal) {
+                int minX = Math.min(startPos, endPos);
+                int maxX = Math.max(startPos, endPos);
+                context.drawHorizontalLine(minX, maxX, staticCoord, color);
+            } else {
+                int minY = Math.min(startPos, endPos);
+                int maxY = Math.max(startPos, endPos);
+                context.drawVerticalLine(staticCoord, minY, maxY, color);
+            }
+        }
+    }
+
+    private int mod(int value, int mod) {
+        int result = value % mod;
+        return result < 0 ? result + mod : result;
+    }
+
+    private void renderConnectionCurve(DrawContext context, int x1, int y1, int x2, int y2, int color) {
+        // Draw a simple L-shaped connection line
+        int midX = x1 + (x2 - x1) / 2;
+        
+        // Horizontal line from source to middle
+        context.drawHorizontalLine(Math.min(x1, midX), Math.max(x1, midX), y1, color);
+        
+        // Vertical line from middle to target
+        context.drawVerticalLine(midX, Math.min(y1, y2), Math.max(y1, y2), color);
+        
+        // Horizontal line from middle to target
+        context.drawHorizontalLine(Math.min(midX, x2), Math.max(midX, x2), y2, color);
+    }
+
+    public List<Node> getNodes() {
+        return nodes;
+    }
+
+    public List<NodeConnection> getConnections() {
+        return connections;
+    }
+    
+    /**
+     * Collects the names of all EVENT_FUNCTION nodes currently in the workspace.
+     * Returns them in insertion order with duplicates removed.
+     */
+    public List<String> getFunctionNames() {
+        LinkedHashSet<String> names = new LinkedHashSet<>();
+        for (Node node : nodes) {
+            if (node.getType() != NodeType.EVENT_FUNCTION) {
+                continue;
+            }
+            NodeParameter nameParam = node.getParameter("Name");
+            if (nameParam == null) {
+                continue;
+            }
+            String value = nameParam.getStringValue();
+            if (value == null) {
+                continue;
+            }
+            String trimmed = value.trim();
+            if (!trimmed.isEmpty()) {
+                names.add(trimmed);
+            }
+        }
+        return new ArrayList<>(names);
+    }
+    
+    public int getCameraX() {
+        return cameraX;
+    }
+    
+    public int getCameraY() {
+        return cameraY;
+    }
+    
+    public void setSidebarWidth(int sidebarWidth) {
+        this.sidebarWidthForRendering = sidebarWidth;
+    }
+    
+    /**
+     * Handle node click and detect double-clicks for parameter editing
+     * Returns true if a double-click was detected and the popup should open
+     */
+    public boolean handleNodeClick(Node clickedNode, int mouseX, int mouseY) {
+        long currentTime = System.currentTimeMillis();
+        boolean isDoubleClick = false;
+        
+        if (clickedNode == lastClickedNode && 
+            (currentTime - lastClickTime) < DOUBLE_CLICK_THRESHOLD) {
+            isDoubleClick = true;
+        }
+        
+        lastClickTime = currentTime;
+        lastClickedNode = clickedNode;
+        
+        return isDoubleClick;
+    }
+    
+    private boolean isMouseOverStartButton(Node startNode, int mouseX, int mouseY) {
+        int centerX = startNode.getX() + startNode.getWidth() / 2;
+        int centerY = startNode.getY() + startNode.getHeight() / 2;
+        int worldMouseX = screenToWorldX(mouseX);
+        int worldMouseY = screenToWorldY(mouseY);
+        
+        // Check if mouse is within the triangle area
+        int triangleSize = 10;
+        int offset = 1;
+        int startX = centerX - triangleSize/2 + offset;
+        
+        // Simple bounding box check for the triangle
+        return worldMouseX >= startX && worldMouseX <= startX + triangleSize &&
+               worldMouseY >= centerY - triangleSize/2 && worldMouseY <= centerY + triangleSize/2;
+    }
+    
+    public boolean isHoveringStartButton() {
+        return hoveringStartButton;
+    }
+
+    public boolean handleStartButtonClick(int mouseX, int mouseY) {
+        lastStartButtonTriggeredExecution = false;
+        Node startNode = findStartNodeAt(mouseX, mouseY);
+        if (startNode == null) {
+            return false;
+        }
+
+        stopCoordinateEditing(true);
+        stopAmountEditing(true);
+
+        hoveredStartNode = startNode;
+
+        ExecutionManager manager = ExecutionManager.getInstance();
+        if (manager.isChainActive(startNode)) {
+            return manager.requestStopForStart(startNode);
+        }
+
+        boolean started = manager.executeBranch(startNode, nodes, connections);
+        if (started) {
+            lastStartButtonTriggeredExecution = true;
+        }
+        return started;
+    }
+
+    private Node findStartNodeAt(int mouseX, int mouseY) {
+        for (Node node : nodes) {
+            if (node.getType() == NodeType.START && isMouseOverStartButton(node, mouseX, mouseY)) {
+                return node;
+            }
+        }
+        return null;
+    }
+    
+    
+    /**
+     * Check if a node should show parameters (Start and End nodes don't)
+     */
+    public boolean shouldShowParameters(Node node) {
+        if (node == null) {
+            return false;
+        }
+        if (node.isParameterNode()) {
+            return node.hasParameters() || node.supportsModeSelection();
+        }
+        return false;
+    }
+
+    public boolean didLastStartButtonTriggerExecution() {
+        return lastStartButtonTriggeredExecution;
+    }
+
+    private void updateCascadeDeletionPreview() {
+        cascadeDeletionPreviewNodes.clear();
+        for (Node node : nodes) {
+            if (!shouldCascadeDelete(node)) {
+                continue;
+            }
+            if (!node.isDragging()) {
+                continue;
+            }
+            int screenX = node.getX() - cameraX;
+            if (!isNodeOverSidebar(node, sidebarWidthForRendering, screenX, node.getWidth())) {
+                continue;
+            }
+            List<Node> removalOrder = new ArrayList<>();
+            collectNodesForCascade(node, removalOrder, new HashSet<>());
+            cascadeDeletionPreviewNodes.addAll(removalOrder);
+        }
+    }
+    
+    /**
+     * Save the current node graph to disk
+     */
+    public boolean save() {
+        boolean saved = NodeGraphPersistence.saveNodeGraphForPreset(activePreset, nodes, connections);
+        if (saved) {
+            workspaceDirty = false;
+        }
+        return saved;
+    }
+
+    /**
+     * Load a node graph from disk, replacing the current one
+     */
+    public boolean load() {
+        NodeGraphData data = NodeGraphPersistence.loadNodeGraphForPreset(activePreset);
+        if (data != null) {
+            boolean applied = applyLoadedData(data);
+            if (applied) {
+                workspaceDirty = false;
+            }
+            return applied;
+        }
+        return false;
+    }
+
+    public boolean importFromPath(Path savePath) {
+        NodeGraphData data = NodeGraphPersistence.loadNodeGraphFromPath(savePath);
+        if (data != null) {
+            boolean applied = applyLoadedData(data);
+            if (applied) {
+                workspaceDirty = true;
+            }
+            return applied;
+        }
+        return false;
+    }
+
+    public boolean exportToPath(Path savePath) {
+        boolean saved = NodeGraphPersistence.saveNodeGraphToPath(nodes, connections, savePath);
+        if (saved) {
+            workspaceDirty = false;
+        }
+        return saved;
+    }
+
+    public void markWorkspaceDirty() {
+        workspaceDirty = true;
+    }
+
+    public void markWorkspaceClean() {
+        workspaceDirty = false;
+    }
+
+    public boolean isWorkspaceDirty() {
+        return workspaceDirty;
+    }
+
+    public void notifyNodeParametersChanged(Node node) {
+        if (node == null) {
+            return;
+        }
+        markWorkspaceDirty();
+        save();
+    }
+
+    public void clearWorkspace() {
+        for (Node node : new ArrayList<>(nodes)) {
+            if (node.hasAttachedSensor()) {
+                node.detachSensor();
+            }
+            if (node.hasAttachedActionNode()) {
+                node.detachActionNode();
+            }
+            if (node.hasAttachedParameter()) {
+                node.detachParameter();
+            }
+            if (node.isSensorNode() && node.isAttachedToControl()) {
+                Node parent = node.getParentControl();
+                if (parent != null) {
+                    parent.detachSensor();
+                }
+            }
+            if (node.isAttachedToActionControl()) {
+                Node parent = node.getParentActionControl();
+                if (parent != null) {
+                    parent.detachActionNode();
+                }
+            }
+            if (node.isParameterNode() && node.getParentParameterHost() != null) {
+                Node parent = node.getParentParameterHost();
+                if (parent != null) {
+                    parent.detachParameter();
+                }
+            }
+            node.setDragging(false);
+            node.setSelected(false);
+        }
+
+        nodes.clear();
+        connections.clear();
+        clearSelection();
+        draggingNode = null;
+        hoveredNode = null;
+        hoveredSocketNode = null;
+        hoveredSocketIndex = -1;
+        hoveredSocket = -1;
+        hoveredSocketIsInput = false;
+        hoveringStartButton = false;
+        hoveredStartNode = null;
+        isDraggingConnection = false;
+        connectionSourceNode = null;
+        disconnectedConnection = null;
+        sensorDropTarget = null;
+        actionDropTarget = null;
+        parameterDropTarget = null;
+        lastClickedNode = null;
+        lastClickTime = 0;
+        cascadeDeletionPreviewNodes.clear();
+        selectionDeletionPreviewActive = false;
+        selectionBoxActive = false;
+    }
+
+    private boolean applyLoadedData(NodeGraphData data) {
+        nodes.clear();
+        connections.clear();
+        clearSelection();
+        draggingNode = null;
+        selectionDeletionPreviewActive = false;
+        selectionBoxActive = false;
+
+        // Load nodes and create node map for connections
+        java.util.Map<String, Node> nodeMap = new java.util.HashMap<>();
+        for (NodeGraphData.NodeData nodeData : data.getNodes()) {
+            Node node = new Node(nodeData.getType(), nodeData.getX(), nodeData.getY());
+
+            // Set the same ID using reflection
+            try {
+                java.lang.reflect.Field idField = Node.class.getDeclaredField("id");
+                idField.setAccessible(true);
+                idField.set(node, nodeData.getId());
+            } catch (Exception e) {
+                System.err.println("Failed to set node ID: " + e.getMessage());
+            }
+
+            // Set the mode if it exists (this will reinitialize parameters)
+            if (nodeData.getMode() != null) {
+                node.setMode(nodeData.getMode());
+            }
+
+            // Restore parameters (overwrite the default parameters with saved ones)
+            node.getParameters().clear();
+            if (nodeData.getParameters() != null) {
+                for (NodeGraphData.ParameterData paramData : nodeData.getParameters()) {
+                    ParameterType paramType = ParameterType.valueOf(paramData.getType());
+                    NodeParameter param = new NodeParameter(paramData.getName(), paramType, paramData.getValue());
+                    node.getParameters().add(param);
+                }
+            }
+            node.recalculateDimensions();
+
+            nodes.add(node);
+            nodeMap.put(nodeData.getId(), node);
+        }
+
+        // Restore sensor attachments
+        for (NodeGraphData.NodeData nodeData : data.getNodes()) {
+            if (nodeData.getAttachedSensorId() != null) {
+                Node control = nodeMap.get(nodeData.getId());
+                Node sensor = nodeMap.get(nodeData.getAttachedSensorId());
+                if (control != null && sensor != null) {
+                    control.attachSensor(sensor);
+                }
+            }
+        }
+
+        for (NodeGraphData.NodeData nodeData : data.getNodes()) {
+            if (nodeData.getParentControlId() != null) {
+                Node sensor = nodeMap.get(nodeData.getId());
+                Node control = nodeMap.get(nodeData.getParentControlId());
+                if (sensor != null && control != null && sensor.isSensorNode()) {
+                    control.attachSensor(sensor);
+                }
+            }
+        }
+
+        for (NodeGraphData.NodeData nodeData : data.getNodes()) {
+            if (nodeData.getAttachedActionId() != null) {
+                Node control = nodeMap.get(nodeData.getId());
+                Node child = nodeMap.get(nodeData.getAttachedActionId());
+                if (control != null && child != null) {
+                    control.attachActionNode(child);
+                }
+            }
+        }
+
+        for (NodeGraphData.NodeData nodeData : data.getNodes()) {
+            if (nodeData.getParentActionControlId() != null) {
+                Node child = nodeMap.get(nodeData.getId());
+                Node control = nodeMap.get(nodeData.getParentActionControlId());
+                if (child != null && control != null && control.canAcceptActionNode(child)) {
+                    control.attachActionNode(child);
+                }
+            }
+        }
+
+        for (NodeGraphData.NodeData nodeData : data.getNodes()) {
+            List<NodeGraphData.ParameterAttachmentData> attachments = nodeData.getParameterAttachments();
+            if (attachments != null && !attachments.isEmpty()) {
+                Node host = nodeMap.get(nodeData.getId());
+                if (host != null) {
+                    attachments.sort(java.util.Comparator.comparingInt(NodeGraphData.ParameterAttachmentData::getSlotIndex));
+                    for (NodeGraphData.ParameterAttachmentData attachment : attachments) {
+                        Node parameter = nodeMap.get(attachment.getParameterNodeId());
+                        if (parameter != null) {
+                            host.attachParameter(parameter, attachment.getSlotIndex());
+                        }
+                    }
+                }
+            } else if (nodeData.getAttachedParameterId() != null) {
+                Node host = nodeMap.get(nodeData.getId());
+                Node parameter = nodeMap.get(nodeData.getAttachedParameterId());
+                if (host != null && parameter != null && parameter.getParentParameterHost() == null) {
+                    host.attachParameter(parameter);
+                }
+            }
+        }
+
+        for (NodeGraphData.NodeData nodeData : data.getNodes()) {
+            List<NodeGraphData.ParameterAttachmentData> attachments = nodeData.getParameterAttachments();
+            if (attachments != null && !attachments.isEmpty()) {
+                continue;
+            }
+            if (nodeData.getParentParameterHostId() != null) {
+                Node parameter = nodeMap.get(nodeData.getId());
+                Node host = nodeMap.get(nodeData.getParentParameterHostId());
+                if (parameter != null && host != null && parameter.isParameterNode()
+                    && parameter.getParentParameterHost() == null) {
+                    host.attachParameter(parameter);
+                }
+            }
+        }
+
+        // Load connections
+        for (NodeGraphData.ConnectionData connData : data.getConnections()) {
+            Node outputNode = nodeMap.get(connData.getOutputNodeId());
+            Node inputNode = nodeMap.get(connData.getInputNodeId());
+
+            if (outputNode != null && inputNode != null) {
+                if (outputNode.isSensorNode() || inputNode.isSensorNode()) {
+                    continue;
+                }
+                NodeConnection connection = new NodeConnection(
+                    outputNode,
+                    inputNode,
+                    connData.getOutputSocket(),
+                    connData.getInputSocket()
+                );
+                connections.add(connection);
+            } else {
+                System.err.println("Failed to restore connection: missing node(s)");
+            }
+        }
+
+        sensorDropTarget = null;
+        actionDropTarget = null;
+        hoveredNode = null;
+        hoveredSocketNode = null;
+        hoveredSocketIndex = -1;
+        hoveredSocket = -1;
+        hoveredSocketIsInput = false;
+        hoveringStartButton = false;
+        hoveredStartNode = null;
+        isDraggingConnection = false;
+        connectionSourceNode = null;
+        disconnectedConnection = null;
+        lastClickedNode = null;
+        lastClickTime = 0;
+        cascadeDeletionPreviewNodes.clear();
+
+        System.out.println("Loaded " + nodes.size() + " nodes and " + connections.size() + " connections");
+        return true;
+    }
+    
+    /**
+     * Check if there's a saved node graph available
+     */
+    public boolean hasSavedGraph() {
+        return NodeGraphPersistence.hasSavedNodeGraph(activePreset);
+    }
+
+    public void setActivePreset(String presetName) {
+        this.activePreset = presetName;
+    }
+
+    public String getActivePreset() {
+        return activePreset;
+    }
+}

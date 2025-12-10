@@ -1,6 +1,7 @@
 {
   "key.pathmind.open_visual_editor": "Open Pathmind Visual Editor",
   "key.pathmind.play_graphs": "Play Graphs",
+  "key.pathmind.stop_graphs": "Stop Graphs",
   "category.pathmind.general": "Pathmind",
   "screen.pathmind.visual_editor.title": "Pathmind Visual Editor",
   "screen.pathmind.visual_editor.subtitle": "Create and manage node-based workflows",

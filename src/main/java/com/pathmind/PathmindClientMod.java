@@ -4,7 +4,7 @@ import com.pathmind.data.PresetManager;
 import com.pathmind.execution.ExecutionManager;
 import com.pathmind.screen.PathmindMainMenuIntegration;
 import com.pathmind.screen.PathmindVisualEditorScreen;
-import com.pathmind.ui.ActiveNodeOverlay;
+import com.pathmind.ui.overlay.ActiveNodeOverlay;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;

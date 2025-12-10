@@ -1,6 +1,7 @@
 {
   "key.pathmind.open_visual_editor": "Abrir Editor Visual Pathmind",
   "key.pathmind.play_graphs": "Reproducir gráficos",
+  "key.pathmind.stop_graphs": "Detener gráficos",
   "category.pathmind.general": "Pathmind",
   "screen.pathmind.visual_editor.title": "Editor Visual Pathmind",
   "screen.pathmind.visual_editor.subtitle": "Crear y gestionar flujos de trabajo basados en nodos",

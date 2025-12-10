@@ -59,7 +59,6 @@ public enum NodeType {
     DROP_ITEM("Drop Item", 0xFFFFAB91, "Drops the currently selected item"),
     DROP_SLOT("Drop Slot", 0xFFFF7043, "Drops items from a specific slot"),
     MOVE_ITEM("Move Item", 0xFFFFB74D, "Moves items between inventory slots"),
-    SWAP_SLOTS("Swap Slots", 0xFFFFF176, "Swaps items between inventory slots"),
     CLEAR_SLOT("Clear Slot", 0xFFB0BEC5, "Clears a slot and optionally drops its contents"),
     OPEN_INVENTORY("Open Inventory", 0xFFB0BEC5, "Opens the player's inventory screen"),
     CLOSE_GUI("Close GUI", 0xFFB0BEC5, "Closes the currently open GUI"),
@@ -215,7 +214,6 @@ public enum NodeType {
             case DROP_ITEM:
             case DROP_SLOT:
             case MOVE_ITEM:
-            case SWAP_SLOTS:
             case CLEAR_SLOT:
             case OPEN_INVENTORY:
             case CLOSE_GUI:
@@ -282,7 +280,6 @@ public enum NodeType {
             case PLACE_HAND:
             case DROP_SLOT:
             case MOVE_ITEM:
-            case SWAP_SLOTS:
             case CLEAR_SLOT:
             case EQUIP_ARMOR:
             case UNEQUIP_ARMOR:

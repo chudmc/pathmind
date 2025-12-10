@@ -9,6 +9,8 @@ import java.util.Optional;
 import java.util.Locale;
 import java.util.EnumSet;
 import java.util.Objects;
+import java.util.Set;
+import java.util.HashSet;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
@@ -22,7 +24,9 @@ import baritone.api.process.IMineProcess;
 import baritone.api.pathing.goals.GoalBlock;
 import baritone.api.utils.BlockOptionalMeta;
 import com.pathmind.execution.PreciseCompletionTracker;
+import com.pathmind.util.InventorySlotModeHelper;
 import net.minecraft.entity.EquipmentSlot;
+import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.entity.player.PlayerInventory;
 import net.minecraft.item.BlockItem;
 import net.minecraft.item.Item;
@@ -208,12 +212,31 @@ public class Node {
         LOOK_ORIENTATION,
         TURN_OFFSET
     }
+    
+    private static final Set<String> MOVE_ITEM_SOURCE_KEYS = createParameterKeySet("SourceSlot", "FirstSlot");
+    private static final Set<String> MOVE_ITEM_TARGET_KEYS = createParameterKeySet("TargetSlot", "SecondSlot");
 
     private static String normalizeParameterKey(String key) {
         if (key == null) {
             return "";
         }
         return key.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]", "");
+    }
+    
+    private static Set<String> createParameterKeySet(String... keys) {
+        Set<String> keySet = new HashSet<>();
+        if (keys == null) {
+            return keySet;
+        }
+        for (String key : keys) {
+            if (key == null || key.isEmpty()) {
+                continue;
+            }
+            keySet.add(key);
+            keySet.add(key.toLowerCase(Locale.ROOT));
+            keySet.add(normalizeParameterKey(key));
+        }
+        return keySet;
     }
 
     private void sendNodeErrorMessage(net.minecraft.client.MinecraftClient client, String message) {
@@ -512,6 +535,10 @@ public class Node {
         if (!isParameterCompatibleWithSlot(parameter, slotIndex)) {
             return false;
         }
+        NodeType parameterType = parameter.getType();
+        if (type == NodeType.MOVE_ITEM && slotIndex >= 0 && slotIndex <= 1 && parameterType == NodeType.PARAM_ITEM) {
+            return true;
+        }
         return canApplyParameterValues(parameter) || canHandleParameterRuntime(parameter, slotIndex);
     }
 
@@ -751,6 +778,9 @@ public class Node {
         if (type == NodeType.PLACE || type == NodeType.PLACE_HAND) {
             return 2;
         }
+        if (type == NodeType.MOVE_ITEM) {
+            return 2;
+        }
         return 1;
     }
 
@@ -774,6 +804,9 @@ public class Node {
     public String getParameterSlotLabel(int slotIndex) {
         if (type == NodeType.PLACE || type == NodeType.PLACE_HAND) {
             return slotIndex == 0 ? "Block" : "Position";
+        }
+        if (type == NodeType.MOVE_ITEM) {
+            return slotIndex == 0 ? "Source Slot" : "Target Slot";
         }
         return "Parameter";
     }
@@ -934,6 +967,9 @@ public class Node {
         int slotY = getParameterSlotTop(slotIndex) + PARAMETER_SLOT_INNER_PADDING;
         int availableWidth = getParameterSlotWidth() - 2 * PARAMETER_SLOT_INNER_PADDING;
         int availableHeight = getParameterSlotHeight(slotIndex) - 2 * PARAMETER_SLOT_INNER_PADDING;
+        if (parameter.width < availableWidth) {
+            parameter.width = availableWidth;
+        }
         int parameterX = slotX + Math.max(0, (availableWidth - parameter.getWidth()) / 2);
         int parameterY = slotY + Math.max(0, (availableHeight - parameter.getHeight()) / 2);
         parameter.setPositionSilently(parameterX, parameterY);
@@ -1068,7 +1104,11 @@ public class Node {
         }
 
         if (parameter.parentParameterHost == this && parameter.parentParameterSlotIndex == slotIndex) {
+            parameter.recalculateDimensions();
+            refreshAttachedParameterValues();
+            recalculateDimensions();
             updateAttachedParameterPosition(slotIndex);
+            updateParentControlLayout();
             return true;
         }
 
@@ -1132,6 +1172,18 @@ public class Node {
             parentControl.recalculateDimensions();
             parentControl.updateAttachedSensorPosition();
         }
+    }
+
+    private void notifyParentParameterHostOfResize() {
+        if (parentParameterHost == null || parentParameterSlotIndex < 0) {
+            return;
+        }
+        parentParameterHost.onAttachedParameterResized(parentParameterSlotIndex);
+    }
+
+    private void onAttachedParameterResized(int slotIndex) {
+        recalculateDimensions();
+        updateParentControlLayout();
     }
 
     private boolean applyParameterValuesFromNode(Node parameter) {
@@ -1227,6 +1279,45 @@ public class Node {
         }
         return false;
     }
+    
+    private Map<String, String> adjustParameterValuesForSlot(Map<String, String> values, int slotIndex) {
+        if (values == null || values.isEmpty() || slotIndex < 0) {
+            return values;
+        }
+        switch (type) {
+            case MOVE_ITEM:
+                if (slotIndex == 0) {
+                    return filterParameterMap(values, MOVE_ITEM_TARGET_KEYS);
+                } else if (slotIndex == 1) {
+                    return filterParameterMap(values, MOVE_ITEM_SOURCE_KEYS);
+                }
+                break;
+            default:
+                break;
+        }
+        return values;
+    }
+    
+    private Map<String, String> filterParameterMap(Map<String, String> values, Set<String> keysToRemove) {
+        if (values == null || values.isEmpty() || keysToRemove == null || keysToRemove.isEmpty()) {
+            return values;
+        }
+        boolean needsFiltering = false;
+        for (String key : keysToRemove) {
+            if (values.containsKey(key)) {
+                needsFiltering = true;
+                break;
+            }
+        }
+        if (!needsFiltering) {
+            return values;
+        }
+        Map<String, String> filtered = new HashMap<>(values);
+        for (String key : keysToRemove) {
+            filtered.remove(key);
+        }
+        return filtered;
+    }
 
     private void refreshAttachedParameterValues() {
         if (isParameterNode()) {
@@ -1249,7 +1340,8 @@ public class Node {
             }
             Map<String, String> exported = parameter.exportParameterValues();
             if (!exported.isEmpty()) {
-                applyParameterValuesFromMap(exported);
+                Map<String, String> adjusted = adjustParameterValuesForSlot(exported, slotIndex);
+                applyParameterValuesFromMap(adjusted);
             }
         }
     }
@@ -1543,10 +1635,6 @@ public class Node {
                 parameters.add(new NodeParameter("TargetSlot", ParameterType.INTEGER, "9"));
                 parameters.add(new NodeParameter("Count", ParameterType.INTEGER, "0"));
                 break;
-            case SWAP_SLOTS:
-                parameters.add(new NodeParameter("FirstSlot", ParameterType.INTEGER, "0"));
-                parameters.add(new NodeParameter("SecondSlot", ParameterType.INTEGER, "9"));
-                break;
             case CLEAR_SLOT:
                 parameters.add(new NodeParameter("Slot", ParameterType.INTEGER, "0"));
                 parameters.add(new NodeParameter("DropItems", ParameterType.BOOLEAN, "false"));
@@ -1703,6 +1791,7 @@ public class Node {
                 break;
             case PARAM_INVENTORY_SLOT:
                 parameters.add(new NodeParameter("Slot", ParameterType.INTEGER, "0"));
+                parameters.add(new NodeParameter("Mode", ParameterType.STRING, "player_inventory"));
                 break;
             case PARAM_MESSAGE:
                 parameters.add(new NodeParameter("Text", ParameterType.STRING, "Hello"));
@@ -1825,7 +1914,11 @@ public class Node {
                 break;
             }
             case PARAM_ITEM: {
-                // No special parameter mapping needed
+                String amount = values.get("Amount");
+                if (amount != null) {
+                    values.put("Count", amount);
+                    values.put(normalizeParameterKey("Count"), amount);
+                }
                 break;
             }
             case PARAM_INVENTORY_SLOT: {
@@ -2104,6 +2197,7 @@ public class Node {
             updateAttachedActionPosition();
         }
         updateAttachedParameterPositions();
+        notifyParentParameterHostOfResize();
     }
 
     /**
@@ -2169,7 +2263,34 @@ public class Node {
     }
 
     private ParameterHandlingResult preprocessAttachedParameter(EnumSet<ParameterUsage> usages, CompletableFuture<Void> future) {
-        return preprocessParameterSlot(0, usages, future, true);
+        if (!attachedParameters.isEmpty()) {
+            java.util.List<Integer> slotIndices = new java.util.ArrayList<>(attachedParameters.keySet());
+            java.util.Collections.sort(slotIndices);
+            ParameterHandlingResult result = ParameterHandlingResult.CONTINUE;
+            boolean resetRuntime = true;
+            for (int slotIndex : slotIndices) {
+                ParameterHandlingResult slotResult = preprocessParameterSlot(slotIndex, usages, future, resetRuntime);
+                resetRuntime = false;
+                if (slotResult == ParameterHandlingResult.COMPLETE) {
+                    result = ParameterHandlingResult.COMPLETE;
+                    break;
+                }
+            }
+            return result;
+        }
+
+        int slotCount = getParameterSlotCount();
+        ParameterHandlingResult result = ParameterHandlingResult.CONTINUE;
+        boolean resetRuntime = true;
+        for (int i = 0; i < slotCount; i++) {
+            ParameterHandlingResult slotResult = preprocessParameterSlot(i, usages, future, resetRuntime);
+            resetRuntime = false;
+            if (slotResult == ParameterHandlingResult.COMPLETE) {
+                result = ParameterHandlingResult.COMPLETE;
+                break;
+            }
+        }
+        return result;
     }
 
     private ParameterHandlingResult preprocessParameterSlot(int slotIndex, EnumSet<ParameterUsage> usages, CompletableFuture<Void> future, boolean resetRuntimeData) {
@@ -2180,10 +2301,10 @@ public class Node {
             runtimeParameterData = null;
         }
         Node parameterNode = getAttachedParameter(slotIndex);
-        return preprocessParameterNode(parameterNode, usages, future);
+        return preprocessParameterNode(parameterNode, slotIndex, usages, future);
     }
 
-    private ParameterHandlingResult preprocessParameterNode(Node parameterNode, EnumSet<ParameterUsage> usages, CompletableFuture<Void> future) {
+    private ParameterHandlingResult preprocessParameterNode(Node parameterNode, int slotIndex, EnumSet<ParameterUsage> usages, CompletableFuture<Void> future) {
         if (parameterNode == null) {
             return ParameterHandlingResult.CONTINUE;
         }
@@ -2194,8 +2315,9 @@ public class Node {
         boolean handled = false;
 
         Map<String, String> exported = parameterNode.exportParameterValues();
+        Map<String, String> adjustedValues = adjustParameterValuesForSlot(exported, slotIndex);
         if (!exported.isEmpty()) {
-            handled = applyParameterValuesFromMap(exported);
+            handled = applyParameterValuesFromMap(adjustedValues);
         }
 
         if (usages.contains(ParameterUsage.POSITION)) {
@@ -2223,6 +2345,14 @@ public class Node {
             if (offsets) {
                 handled = true;
             } else if (future != null && future.isDone()) {
+                return ParameterHandlingResult.COMPLETE;
+            }
+        }
+
+        if (!handled && type == NodeType.MOVE_ITEM && parameterNode.getType() == NodeType.PARAM_ITEM) {
+            if (resolveMoveItemSlotFromItemParameter(parameterNode, slotIndex, future)) {
+                handled = true;
+            } else {
                 return ParameterHandlingResult.COMPLETE;
             }
         }
@@ -2951,9 +3081,6 @@ public class Node {
                 break;
             case MOVE_ITEM:
                 executeMoveItemCommand(future);
-                break;
-            case SWAP_SLOTS:
-                executeSwapSlotsCommand(future);
                 break;
             case CLEAR_SLOT:
                 executeClearSlotCommand(future);
@@ -4098,6 +4225,20 @@ public class Node {
         return logicalSlot;
     }
 
+    private int mapPlayerInventorySlot(ScreenHandler handler, int inventorySlot) {
+        if (handler == null) {
+            return -1;
+        }
+        List<Slot> slots = handler.slots;
+        for (int slotIdx = 0; slotIdx < slots.size(); slotIdx++) {
+            Slot slot = slots.get(slotIdx);
+            if (slot.inventory instanceof PlayerInventory && slot.getIndex() == inventorySlot) {
+                return slotIdx;
+            }
+        }
+        return -1;
+    }
+
     private List<GridIngredient> resolveGridIngredients(CraftingRecipe recipe, NodeMode craftMode) {
         List<GridIngredient> result = new ArrayList<>();
         if (recipe == null) {
@@ -5168,91 +5309,215 @@ public class Node {
             future.completeExceptionally(new RuntimeException("Minecraft client not available"));
             return;
         }
-        
-        PlayerInventory inventory = client.player.getInventory();
-        int sourceSlot = clampInventorySlot(inventory, getIntParameter("SourceSlot", 0));
-        int targetSlot = clampInventorySlot(inventory, getIntParameter("TargetSlot", 0));
-        int requestedCount = getIntParameter("Count", 0);
-        
-        if (sourceSlot == targetSlot) {
+
+        ClientPlayerInteractionManager interactionManager = client.interactionManager;
+        ScreenHandler handler = client.player.currentScreenHandler;
+        if (interactionManager == null || handler == null) {
+            future.completeExceptionally(new RuntimeException("Interaction manager unavailable"));
+            return;
+        }
+
+        if (!handler.getCursorStack().isEmpty()) {
+            sendNodeErrorMessage(client, "Cannot move items while the cursor is holding another stack.");
             future.complete(null);
             return;
         }
-        
-        ItemStack sourceStack = inventory.getStack(sourceSlot);
+
+        PlayerInventory inventory = client.player.getInventory();
+        int requestedSourceSlot = getIntParameter("SourceSlot", 0);
+        int requestedTargetSlot = getIntParameter("TargetSlot", 0);
+
+        SlotSelectionType sourceSelection = resolveInventorySlotSelectionType(0);
+        SlotSelectionType targetSelection = resolveInventorySlotSelectionType(1);
+        SlotResolution sourceResolution = resolveInventorySlot(handler, inventory, requestedSourceSlot, sourceSelection);
+        SlotResolution targetResolution = resolveInventorySlot(handler, inventory, requestedTargetSlot, targetSelection);
+
+        if (sourceResolution == null || targetResolution == null) {
+            future.complete(null);
+            return;
+        }
+
+        if (sourceResolution.handlerSlotIndex == targetResolution.handlerSlotIndex) {
+            future.complete(null);
+            return;
+        }
+
+        ItemStack sourceStack = sourceResolution.slot.getStack();
         if (sourceStack.isEmpty()) {
             future.complete(null);
             return;
         }
-        
-        ItemStack movingStack;
-        if (requestedCount <= 0 || requestedCount >= sourceStack.getCount()) {
-            movingStack = sourceStack.copy();
-            inventory.setStack(sourceSlot, ItemStack.EMPTY);
-        } else {
-            movingStack = sourceStack.copy();
-            movingStack.setCount(requestedCount);
-            sourceStack.decrement(requestedCount);
-            inventory.setStack(sourceSlot, sourceStack.isEmpty() ? ItemStack.EMPTY : sourceStack);
+
+        int requestedCount = getIntParameter("Count", 0);
+        int available = sourceStack.getCount();
+        int moveCount = requestedCount <= 0 ? available : Math.min(requestedCount, available);
+        if (moveCount <= 0) {
+            future.complete(null);
+            return;
         }
-        
-        ItemStack targetStack = inventory.getStack(targetSlot);
-        if (targetStack.isEmpty()) {
-            inventory.setStack(targetSlot, movingStack);
-        } else if (canStacksCombine(targetStack, movingStack)) {
-            int transferable = Math.min(targetStack.getMaxCount() - targetStack.getCount(), movingStack.getCount());
-            if (transferable > 0) {
-                targetStack.increment(transferable);
-                movingStack.decrement(transferable);
-            }
-            if (!movingStack.isEmpty()) {
-                if (inventory.getStack(sourceSlot).isEmpty()) {
-                    inventory.setStack(sourceSlot, movingStack);
-                } else {
-                    client.player.dropItem(movingStack, true);
-                }
-            }
-        } else {
-            inventory.setStack(targetSlot, movingStack);
-            if (inventory.getStack(sourceSlot).isEmpty()) {
-                inventory.setStack(sourceSlot, targetStack);
-            } else {
-                client.player.dropItem(targetStack, true);
-            }
-        }
-        
+
+        boolean moveEntireStack = moveCount >= available;
+        performInventoryTransfer(
+            interactionManager,
+            handler,
+            client.player,
+            sourceResolution.handlerSlotIndex,
+            targetResolution.handlerSlotIndex,
+            moveCount,
+            moveEntireStack
+        );
+
         inventory.markDirty();
         client.player.playerScreenHandler.sendContentUpdates();
         future.complete(null);
     }
-    
-    private void executeSwapSlotsCommand(CompletableFuture<Void> future) {
-        if (preprocessAttachedParameter(EnumSet.noneOf(ParameterUsage.class), future) == ParameterHandlingResult.COMPLETE) {
+
+    private void performInventoryTransfer(ClientPlayerInteractionManager interactionManager, ScreenHandler handler,
+                                          PlayerEntity player, int sourceSlot, int targetSlot, int moveCount, boolean moveEntireStack) {
+        if (moveEntireStack) {
+            interactionManager.clickSlot(handler.syncId, sourceSlot, 0, SlotActionType.PICKUP, player);
+            interactionManager.clickSlot(handler.syncId, targetSlot, 0, SlotActionType.PICKUP, player);
+            interactionManager.clickSlot(handler.syncId, sourceSlot, 0, SlotActionType.PICKUP, player);
             return;
+        }
+
+        interactionManager.clickSlot(handler.syncId, sourceSlot, 0, SlotActionType.PICKUP, player);
+        int moved = 0;
+        while (moved < moveCount) {
+            int beforeCursor = handler.getCursorStack().getCount();
+            interactionManager.clickSlot(handler.syncId, targetSlot, 1, SlotActionType.PICKUP, player);
+            int afterCursor = handler.getCursorStack().getCount();
+            if (afterCursor >= beforeCursor) {
+                break;
+            }
+            moved++;
+        }
+        interactionManager.clickSlot(handler.syncId, sourceSlot, 0, SlotActionType.PICKUP, player);
+    }
+
+    private SlotSelectionType resolveInventorySlotSelectionType(int parameterSlotIndex) {
+        Node parameterNode = getAttachedParameter(parameterSlotIndex);
+        if (parameterNode != null && parameterNode.getType() == NodeType.PARAM_INVENTORY_SLOT) {
+            String modeValue = getParameterString(parameterNode, "Mode");
+            Boolean isPlayer = InventorySlotModeHelper.extractPlayerSelectionFlag(modeValue);
+            if (isPlayer != null) {
+                return isPlayer ? SlotSelectionType.PLAYER_INVENTORY : SlotSelectionType.GUI_CONTAINER;
+            }
+            String modeId = InventorySlotModeHelper.extractModeId(modeValue);
+            if (modeId != null && !modeId.isEmpty() && !"player_inventory".equals(modeId)) {
+                return SlotSelectionType.GUI_CONTAINER;
+            }
+        }
+        return SlotSelectionType.PLAYER_INVENTORY;
+    }
+
+    private SlotResolution resolveInventorySlot(ScreenHandler handler, PlayerInventory inventory, int slotValue, SlotSelectionType selectionType) {
+        if (handler == null) {
+            return null;
+        }
+        if (selectionType == SlotSelectionType.GUI_CONTAINER) {
+            if (slotValue < 0 || slotValue >= handler.slots.size()) {
+                return null;
+            }
+            Slot slot = handler.getSlot(slotValue);
+            if (slot == null) {
+                return null;
+            }
+            if (slot.inventory instanceof PlayerInventory) {
+                return resolveInventorySlot(handler, inventory, slotValue, SlotSelectionType.PLAYER_INVENTORY);
+            }
+            return new SlotResolution(slot, slotValue);
+        }
+        if (inventory == null) {
+            return null;
+        }
+        int clamped = clampInventorySlot(inventory, slotValue);
+        int handlerSlot = mapPlayerInventorySlot(handler, clamped);
+        if (handlerSlot < 0 || handlerSlot >= handler.slots.size()) {
+            return null;
+        }
+        Slot slot = handler.getSlot(handlerSlot);
+        if (slot == null) {
+            return null;
+        }
+        return new SlotResolution(slot, handlerSlot);
+    }
+
+    private enum SlotSelectionType {
+        PLAYER_INVENTORY,
+        GUI_CONTAINER
+    }
+
+    private static final class SlotResolution {
+        final Slot slot;
+        final int handlerSlotIndex;
+
+        SlotResolution(Slot slot, int handlerSlotIndex) {
+            this.slot = slot;
+            this.handlerSlotIndex = handlerSlotIndex;
+        }
+    }
+
+    private boolean resolveMoveItemSlotFromItemParameter(Node parameterNode, int slotIndex, CompletableFuture<Void> future) {
+        if (slotIndex < 0 || slotIndex > 1) {
+            return false;
         }
         net.minecraft.client.MinecraftClient client = net.minecraft.client.MinecraftClient.getInstance();
         if (client == null || client.player == null) {
-            future.completeExceptionally(new RuntimeException("Minecraft client not available"));
-            return;
+            if (future != null && !future.isDone()) {
+                future.completeExceptionally(new RuntimeException("Minecraft client not available"));
+            }
+            return false;
         }
-        
-        PlayerInventory inventory = client.player.getInventory();
-        int firstSlot = clampInventorySlot(inventory, getIntParameter("FirstSlot", 0));
-        int secondSlot = clampInventorySlot(inventory, getIntParameter("SecondSlot", 0));
-        
-        if (firstSlot == secondSlot) {
-            future.complete(null);
-            return;
+
+        String requestedItem = getParameterString(parameterNode, "Item");
+        if (requestedItem == null || requestedItem.trim().isEmpty()) {
+            sendParameterSearchFailure("No item selected on parameter for " + type.getDisplayName() + ".", future);
+            return false;
         }
-        
-        ItemStack first = inventory.getStack(firstSlot);
-        ItemStack second = inventory.getStack(secondSlot);
-        inventory.setStack(firstSlot, second);
-        inventory.setStack(secondSlot, first);
-        
-        inventory.markDirty();
-        client.player.playerScreenHandler.sendContentUpdates();
-        future.complete(null);
+
+        String sanitized = sanitizeResourceId(requestedItem);
+        if (sanitized == null || sanitized.isEmpty()) {
+            sendParameterSearchFailure("No item selected on parameter for " + type.getDisplayName() + ".", future);
+            return false;
+        }
+
+        String normalized = normalizeResourceId(sanitized, "minecraft");
+        Identifier identifier = Identifier.tryParse(normalized);
+        if (identifier == null || !Registries.ITEM.containsId(identifier)) {
+            sendParameterSearchFailure("Unknown item \"" + requestedItem + "\" for " + type.getDisplayName() + ".", future);
+            return false;
+        }
+
+        Item item = Registries.ITEM.get(identifier);
+        int slot = findFirstSlotWithItem(client.player.getInventory(), item);
+        if (slot < 0) {
+            sendParameterSearchFailure("No " + normalized + " found in inventory for " + type.getDisplayName() + ".", future);
+            return false;
+        }
+
+        String targetParameter = slotIndex == 0 ? "SourceSlot" : "TargetSlot";
+        setParameterValueAndPropagate(targetParameter, Integer.toString(slot));
+        if (slotIndex == 0) {
+            if (runtimeParameterData == null) {
+                runtimeParameterData = new RuntimeParameterData();
+            }
+            runtimeParameterData.slotIndex = slot;
+        }
+        return true;
+    }
+
+    private int findFirstSlotWithItem(PlayerInventory inventory, Item item) {
+        if (inventory == null || item == null) {
+            return -1;
+        }
+        for (int i = 0; i < inventory.size(); i++) {
+            ItemStack stack = inventory.getStack(i);
+            if (!stack.isEmpty() && stack.isOf(item)) {
+                return i;
+            }
+        }
+        return -1;
     }
     
     private void executeClearSlotCommand(CompletableFuture<Void> future) {

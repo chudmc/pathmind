@@ -6,9 +6,9 @@ import com.pathmind.data.PresetManager;
 import com.pathmind.execution.ExecutionManager;
 import com.pathmind.nodes.Node;
 import com.pathmind.nodes.NodeType;
-import com.pathmind.ui.NodeGraph;
-import com.pathmind.ui.NodeParameterOverlay;
-import com.pathmind.ui.Sidebar;
+import com.pathmind.ui.graph.NodeGraph;
+import com.pathmind.ui.overlay.NodeParameterOverlay;
+import com.pathmind.ui.sidebar.Sidebar;
 import net.fabricmc.loader.api.FabricLoader;
 import net.fabricmc.loader.api.ModContainer;
 import net.minecraft.client.MinecraftClient;
@@ -27,6 +27,7 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * The main visual editor screen for Pathmind.
@@ -36,10 +37,10 @@ public class PathmindVisualEditorScreen extends Screen {
     private static final int TITLE_BAR_HEIGHT = 20;
     
     // Dark mode color palette
-    private static final int DARK_GREY = 0xFF1A1A1A;        // Very dark grey background
-    private static final int DARK_GREY_ALT = 0xFF2A2A2A;     // Slightly lighter dark grey
-    private static final int GREY_LINE = 0xFF666666;         // Grey line color
-    private static final int WHITE = 0xFFFFFFFF;             // Pure white text
+    private static final int DARK_GREY = 0xFF1A1A1A;
+    private static final int DARK_GREY_ALT = 0xFF2A2A2A;
+    private static final int GREY_LINE = 0xFF666666;
+    private static final int WHITE = 0xFFFFFFFF;
     private static final int ACCENT_COLOR = 0xFF87CEEB;
     private static final int SUCCESS_COLOR = 0xFF6DCB5A;
     private static final int ERROR_COLOR = 0xFFE57373;
@@ -108,7 +109,6 @@ public class PathmindVisualEditorScreen extends Screen {
     @Override
     protected void init() {
         super.init();
-        // No buttons needed - just the title bar
 
         refreshAvailablePresets();
         nodeGraph.setActivePreset(activePresetName);
@@ -176,6 +176,7 @@ public class PathmindVisualEditorScreen extends Screen {
         
         // Render dragged nodes above sidebar
         renderNodeGraph(context, mouseX, mouseY, delta, true);
+        nodeGraph.renderSelectionBox(context);
         
         // Render dragging node from sidebar
         if (isDraggingFromSidebar && draggingNodeType != null) {
@@ -270,8 +271,11 @@ public class PathmindVisualEditorScreen extends Screen {
 
     private void renderZoomControls(DrawContext context, int mouseX, int mouseY, boolean disabled) {
         int buttonY = getZoomButtonY();
-        drawZoomButton(context, getZoomMinusButtonX(), buttonY, mouseX, mouseY, disabled, true, false);
-        drawZoomButton(context, getZoomPlusButtonX(), buttonY, mouseX, mouseY, disabled, false, false);
+        NodeGraph.ZoomLevel level = nodeGraph.getZoomLevel();
+        boolean minusActive = level != NodeGraph.ZoomLevel.FOCUSED;
+        boolean plusActive = level == NodeGraph.ZoomLevel.FOCUSED;
+        drawZoomButton(context, getZoomMinusButtonX(), buttonY, mouseX, mouseY, disabled, true, minusActive);
+        drawZoomButton(context, getZoomPlusButtonX(), buttonY, mouseX, mouseY, disabled, false, plusActive);
     }
 
     private void drawZoomButton(DrawContext context, int x, int y, int mouseX, int mouseY, boolean disabled, boolean isMinus, boolean active) {
@@ -284,21 +288,17 @@ public class PathmindVisualEditorScreen extends Screen {
         }
         context.fill(x + 1, y + 1, x + ZOOM_BUTTON_SIZE - 1, y + ZOOM_BUTTON_SIZE - 1, bgColor);
 
-        int borderColor = active ? ACCENT_COLOR : GREY_LINE;
+        int borderColor = GREY_LINE;
         if (hovered) {
             borderColor = ACCENT_COLOR;
-        } else if (disabled) {
-            borderColor = GREY_LINE;
         }
         context.drawBorder(x, y, ZOOM_BUTTON_SIZE, ZOOM_BUTTON_SIZE, borderColor);
 
-        int iconColor;
+        int iconColor = WHITE;
         if (disabled) {
             iconColor = 0xFF555555;
-        } else if (hovered || active) {
+        } else if (hovered) {
             iconColor = ACCENT_COLOR;
-        } else {
-            iconColor = WHITE;
         }
 
         Text iconText = Text.literal(isMinus ? "-" : "+");
@@ -584,7 +584,11 @@ public class PathmindVisualEditorScreen extends Screen {
                     return true;
                 }
                 
-                nodeGraph.selectNode(clickedNode);
+                if (!nodeGraph.isNodeSelected(clickedNode)) {
+                    nodeGraph.selectNode(clickedNode);
+                } else {
+                    nodeGraph.focusSelectedNode(clickedNode);
+                }
                 nodeGraph.startDragging(clickedNode, (int)mouseX, (int)mouseY);
                 return true;
             }
@@ -602,6 +606,7 @@ public class PathmindVisualEditorScreen extends Screen {
             if (button == 0) {
                 nodeGraph.stopCoordinateEditing(true);
                 nodeGraph.stopAmountEditing(true);
+                nodeGraph.beginSelectionBox((int) mouseX, (int) mouseY);
             }
             return true;
         }
@@ -623,6 +628,11 @@ public class PathmindVisualEditorScreen extends Screen {
             return true;
         }
 
+        if (button == 0 && nodeGraph.isSelectionBoxActive()) {
+            nodeGraph.updateSelectionBox((int) mouseX, (int) mouseY);
+            return true;
+        }
+
         // Handle dragging from sidebar
         if (isDraggingFromSidebar && button == 0) {
             if (draggingNodeType != null && mouseX >= sidebar.getWidth() && mouseY > TITLE_BAR_HEIGHT) {
@@ -638,6 +648,7 @@ public class PathmindVisualEditorScreen extends Screen {
         // Handle node dragging and connection dragging
         if (button == 0) {
             nodeGraph.updateDrag((int)mouseX, (int)mouseY);
+            updateSelectionDeletionPreviewState();
             return true;
         }
         
@@ -671,6 +682,11 @@ public class PathmindVisualEditorScreen extends Screen {
             return true;
         }
 
+        if (button == 0 && nodeGraph.isSelectionBoxActive()) {
+            nodeGraph.completeSelectionBox();
+            return true;
+        }
+
         if (button == 0) {
             // Handle dropping node from sidebar
             if (isDraggingFromSidebar) {
@@ -688,7 +704,27 @@ public class PathmindVisualEditorScreen extends Screen {
                 nodeGraph.resetDropTargets();
             } else {
                 // Check if dragging node into sidebar for deletion (only if actually dragging)
-                if (nodeGraph.getSelectedNode() != null && nodeGraph.getSelectedNode().isDragging()) {
+                Set<Node> selectedNodes = nodeGraph.getSelectedNodes();
+                if (selectedNodes != null && !selectedNodes.isEmpty()) {
+                    List<Node> snapshot = new ArrayList<>(selectedNodes);
+                    boolean selectionDragged = false;
+                    boolean selectionOverSidebar = false;
+                    for (Node selected : snapshot) {
+                        if (selected == null) {
+                            continue;
+                        }
+                        if (selected.isDragging()) {
+                            selectionDragged = true;
+                            if (nodeGraph.isNodeOverSidebar(selected, sidebar.getWidth())) {
+                                selectionOverSidebar = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (selectionDragged && selectionOverSidebar) {
+                        nodeGraph.deleteSelectedNode();
+                    }
+                } else if (nodeGraph.getSelectedNode() != null && nodeGraph.getSelectedNode().isDragging()) {
                     nodeGraph.deleteNodeIfInSidebar(nodeGraph.getSelectedNode(), (int)mouseX, sidebar.getWidth());
                 }
                 
@@ -776,65 +812,19 @@ public class PathmindVisualEditorScreen extends Screen {
             return true;
         }
 
+        if (handleNodeGraphShortcuts(keyCode, modifiers)) {
+            return true;
+        }
+
         // Close screen with Escape key
         if (keyCode == GLFW.GLFW_KEY_ESCAPE) {
             close();
             return true;
         }
-
-        boolean isCtrlOrCmdDown = (modifiers & (GLFW.GLFW_MOD_CONTROL | GLFW.GLFW_MOD_SUPER)) != 0;
-        boolean isShiftDown = (modifiers & GLFW.GLFW_MOD_SHIFT) != 0;
-
-        if (isCtrlOrCmdDown && keyCode == GLFW.GLFW_KEY_Z) {
-            if (isShiftDown) {
-                if (nodeGraph.redo()) {
-                    return true;
-                }
-            } else {
-                if (nodeGraph.undo()) {
-                    return true;
-                }
-            }
-        }
-
-        if (isCtrlOrCmdDown && keyCode == GLFW.GLFW_KEY_Y) {
-            if (nodeGraph.redo()) {
-                return true;
-            }
-        }
         
         // Delete selected node with Delete key
-        if (keyCode == GLFW.GLFW_KEY_DELETE || keyCode == GLFW.GLFW_KEY_BACKSPACE) {
+        if (keyCode == GLFW.GLFW_KEY_DELETE) {
             if (nodeGraph.deleteSelectedNode()) {
-                return true;
-            }
-        }
-
-        if (isCtrlOrCmdDown && (keyCode == GLFW.GLFW_KEY_EQUAL || keyCode == GLFW.GLFW_KEY_KP_ADD)) {
-            nodeGraph.zoomIn(getWorkspaceCenterX(), getWorkspaceCenterY());
-            return true;
-        }
-
-        if (isCtrlOrCmdDown && (keyCode == GLFW.GLFW_KEY_MINUS || keyCode == GLFW.GLFW_KEY_KP_SUBTRACT)) {
-            nodeGraph.zoomOut(getWorkspaceCenterX(), getWorkspaceCenterY());
-            return true;
-        }
-
-        // Copy/Paste/Duplicate selected node
-        if (isCtrlOrCmdDown && keyCode == GLFW.GLFW_KEY_C) {
-            if (nodeGraph.copySelectedNodeToClipboard()) {
-                return true;
-            }
-        }
-
-        if (isCtrlOrCmdDown && keyCode == GLFW.GLFW_KEY_V) {
-            if (nodeGraph.pasteClipboardNode() != null) {
-                return true;
-            }
-        }
-
-        if (isCtrlOrCmdDown && keyCode == GLFW.GLFW_KEY_D) {
-            if (nodeGraph.duplicateSelectedNode() != null) {
                 return true;
             }
         }
@@ -1384,6 +1374,37 @@ public class PathmindVisualEditorScreen extends Screen {
         importExportStatusColor = 0xFFCCCCCC;
     }
 
+    private boolean handleNodeGraphShortcuts(int keyCode, int modifiers) {
+        if (!isShortcutModifierDown(modifiers)) {
+            return false;
+        }
+
+        switch (keyCode) {
+            case GLFW.GLFW_KEY_C:
+                nodeGraph.copySelectedNodeToClipboard();
+                return true;
+            case GLFW.GLFW_KEY_V:
+                nodeGraph.pasteClipboardNode();
+                return true;
+            case GLFW.GLFW_KEY_D:
+                nodeGraph.duplicateSelectedNode();
+                return true;
+            case GLFW.GLFW_KEY_Z:
+                if ((modifiers & GLFW.GLFW_MOD_SHIFT) != 0) {
+                    nodeGraph.redo();
+                } else {
+                    nodeGraph.undo();
+                }
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private boolean isShortcutModifierDown(int modifiers) {
+        return (modifiers & (GLFW.GLFW_MOD_CONTROL | GLFW.GLFW_MOD_SUPER)) != 0;
+    }
+
     private void dismissParameterOverlay() {
         if (parameterOverlay != null && parameterOverlay.isVisible()) {
             parameterOverlay.close();
@@ -1874,6 +1895,20 @@ public class PathmindVisualEditorScreen extends Screen {
     private void clearCreatePresetStatus() {
         createPresetStatus = "";
         createPresetStatusColor = 0xFFCCCCCC;
+    }
+
+    private void updateSelectionDeletionPreviewState() {
+        Set<Node> selectedNodes = nodeGraph.getSelectedNodes();
+        boolean preview = false;
+        if (selectedNodes != null && !selectedNodes.isEmpty()) {
+            for (Node node : selectedNodes) {
+                if (node != null && node.isDragging() && nodeGraph.isNodeOverSidebar(node, sidebar.getWidth())) {
+                    preview = true;
+                    break;
+                }
+            }
+        }
+        nodeGraph.setSelectionDeletionPreviewActive(preview);
     }
 
     private void refreshAvailablePresets() {
