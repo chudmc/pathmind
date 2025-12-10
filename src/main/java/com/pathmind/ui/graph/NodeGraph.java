@@ -423,42 +423,58 @@ public class NodeGraph {
     }
 
     public Node getNodeAt(int x, int y) {
-        // Convert screen coordinates to world coordinates
         int worldX = screenToWorldX(x);
         int worldY = screenToWorldY(y);
 
-        for (Node node : nodes) {
-            if (node.isSensorNode() && node.containsPoint(worldX, worldY)) {
-                if (node.hasAttachedParameter()) {
-                    for (Node parameter : node.getAttachedParameters().values()) {
-                        if (parameter != null && parameter.containsPoint(worldX, worldY)) {
-                            return parameter;
-                        }
-                    }
+        Set<Node> processedRoots = new HashSet<>();
+        for (int i = nodes.size() - 1; i >= 0; i--) {
+            Node node = nodes.get(i);
+            Node root = getRootNode(node);
+            if (root == null || processedRoots.contains(root)) {
+                continue;
+            }
+            processedRoots.add(root);
+            Node hit = findNodeInHierarchyAt(root, worldX, worldY);
+            if (hit != null) {
+                return hit;
+            }
+        }
+        return null;
+    }
+
+    private Node findNodeInHierarchyAt(Node node, int worldX, int worldY) {
+        if (node == null) {
+            return null;
+        }
+
+        Map<Integer, Node> parameterMap = node.getAttachedParameters();
+        if (parameterMap != null && !parameterMap.isEmpty()) {
+            List<Integer> keys = new ArrayList<>(parameterMap.keySet());
+            keys.sort(Collections.reverseOrder());
+            for (Integer key : keys) {
+                Node hit = findNodeInHierarchyAt(parameterMap.get(key), worldX, worldY);
+                if (hit != null) {
+                    return hit;
                 }
-                return node;
             }
         }
 
-        for (int i = nodes.size() - 1; i >= 0; i--) {
-            Node node = nodes.get(i);
-            if (!node.isParameterNode()) {
-                continue;
-            }
-            if (node.containsPoint(worldX, worldY)) {
-                return node;
-            }
+        Node sensorChild = node.getAttachedSensor();
+        Node hit = findNodeInHierarchyAt(sensorChild, worldX, worldY);
+        if (hit != null) {
+            return hit;
         }
 
-        for (int i = nodes.size() - 1; i >= 0; i--) {
-            Node node = nodes.get(i);
-            if (node.isSensorNode() || node.isParameterNode()) {
-                continue;
-            }
-            if (node.containsPoint(worldX, worldY)) {
-                return node;
-            }
+        Node actionChild = node.getAttachedActionNode();
+        hit = findNodeInHierarchyAt(actionChild, worldX, worldY);
+        if (hit != null) {
+            return hit;
         }
+
+        if (node.containsPoint(worldX, worldY)) {
+            return node;
+        }
+
         return null;
     }
 
