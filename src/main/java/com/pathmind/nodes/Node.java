@@ -1822,7 +1822,6 @@ public class Node {
                 break;
             case PARAM_CLOSEST:
                 parameters.add(new NodeParameter("Range", ParameterType.INTEGER, "5"));
-                parameters.add(new NodeParameter("RequireSolidGround", ParameterType.BOOLEAN, "true"));
                 break;
             default:
                 // No parameters needed
@@ -2550,9 +2549,7 @@ public class Node {
                     return Optional.empty();
                 }
                 int range = Math.max(1, parseNodeInt(parameterNode, "Range", 5));
-                String requireSolidGroundValue = getParameterString(parameterNode, "RequireSolidGround");
-                boolean requireSolidGround = requireSolidGroundValue == null || Boolean.parseBoolean(requireSolidGroundValue);
-                Optional<BlockPos> open = findNearestOpenBlock(client, range, requireSolidGround);
+                Optional<BlockPos> open = findNearestOpenBlock(client, range);
                 if (open.isEmpty()) {
                     sendParameterSearchFailure("No open block found within range for " + type.getDisplayName() + ".", future);
                     return Optional.empty();
@@ -2946,7 +2943,7 @@ public class Node {
         return Optional.ofNullable(bestPos);
     }
 
-    private Optional<BlockPos> findNearestOpenBlock(net.minecraft.client.MinecraftClient client, int range, boolean requireSolidGround) {
+    private Optional<BlockPos> findNearestOpenBlock(net.minecraft.client.MinecraftClient client, int range) {
         if (client == null || client.player == null || client.world == null) {
             return Optional.empty();
         }
@@ -2965,13 +2962,6 @@ public class Node {
                     }
                     if (!isBlockReplaceable(client.world, mutable)) {
                         continue;
-                    }
-                    if (requireSolidGround) {
-                        BlockPos below = mutable.down();
-                        BlockState belowState = client.world.getBlockState(below);
-                        if (!belowState.isSolidBlock(client.world, below)) {
-                            continue;
-                        }
                     }
                     Box blockBox = new Box(mutable.getX(), mutable.getY(), mutable.getZ(), mutable.getX() + 1, mutable.getY() + 1, mutable.getZ() + 1);
                     if (!client.world.getOtherEntities(null, blockBox).isEmpty()) {
@@ -3510,13 +3500,31 @@ public class Node {
                 }
                 System.out.println("Executing mine by name for " + amount + "x " + targets);
                 PreciseCompletionTracker.getInstance().startTrackingTask(PreciseCompletionTracker.TASK_COLLECT, future);
-                CompletableFuture.runAsync(() -> mineProcess.mineByName(amount, targets.toArray(new String[0])));
+                // Dispatch Baritone calls off the render thread so the client never blocks
+                CompletableFuture.runAsync(() -> {
+                    try {
+                        mineProcess.mineByName(amount, targets.toArray(new String[0]));
+                        System.out.println("Collect (single) dispatched mine command; active=" + mineProcess.isActive());
+                    } catch (Exception e) {
+                        System.err.println("Failed to start mine command: " + e.getMessage());
+                        e.printStackTrace();
+                    }
+                });
                 break;
             }
             case COLLECT_MULTIPLE: {
                 System.out.println("Executing mine by name for blocks: " + targets);
                 PreciseCompletionTracker.getInstance().startTrackingTask(PreciseCompletionTracker.TASK_COLLECT, future);
-                CompletableFuture.runAsync(() -> mineProcess.mineByName(targets.toArray(new String[0])));
+                // Dispatch Baritone calls off the render thread so the client never blocks
+                CompletableFuture.runAsync(() -> {
+                    try {
+                        mineProcess.mineByName(targets.toArray(new String[0]));
+                        System.out.println("Collect (multi) dispatched mine command; active=" + mineProcess.isActive());
+                    } catch (Exception e) {
+                        System.err.println("Failed to start mine command: " + e.getMessage());
+                        e.printStackTrace();
+                    }
+                });
                 break;
             }
             default:

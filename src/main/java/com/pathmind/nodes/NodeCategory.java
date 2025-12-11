@@ -5,7 +5,7 @@ package com.pathmind.nodes;
  */
 public enum NodeCategory {
     EVENTS("Events", 0xFFE91E63, "Event entry points and triggers", "★"),
-    LOGIC("Logic", 0xFFFFC107, "Flow control and condition checks", "⬚"),
+    LOGIC("Logic", 0xFFFFC107, "Flow control and condition checks", "🧠"),
     MOVEMENT("Movement", 0xFF00BCD4, "Pathfinding and player movement actions", "⇄"),
     WORLD("World Automation", 0xFF4CAF50, "Mining, building, and exploration tasks", "🌍"),
     INTERACTION("Interaction", 0xFF7E57C2, "Combat and interaction commands", "✋"),

@@ -16,6 +16,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.Optional;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.text.Text;
 
 /**
  * Tracks Baritone processes precisely by monitoring their actual state changes.
@@ -27,6 +29,7 @@ public class PreciseCompletionTracker {
     private final Map<String, CompletableFuture<Void>> pendingTasks = new ConcurrentHashMap<>();
     private final Map<String, ProcessState> processStates = new ConcurrentHashMap<>();
     private final Map<String, Long> taskStartTimes = new ConcurrentHashMap<>();
+    private final Map<String, Long> taskCompletionGraceStarts = new ConcurrentHashMap<>();
     private Timer monitoringTimer;
     
     // Task types
@@ -39,6 +42,8 @@ public class PreciseCompletionTracker {
     
     // Maximum monitoring duration (in milliseconds) - safety fallback
     private static final long MAX_MONITORING_DURATION = 300000; // 5 minutes
+    private static final long TASK_START_TIMEOUT_MS = 8000;
+    private static final long COLLECT_COMPLETION_GRACE_MS = 750;
     
     private enum ProcessState {
         STARTING,
@@ -221,19 +226,48 @@ public class PreciseCompletionTracker {
         }
 
         ProcessState currentState = processStates.get(taskId);
+        boolean active = mineProcess.isActive();
 
-        if (currentState == ProcessState.STARTING && mineProcess.isActive()) {
+        if (currentState == ProcessState.STARTING && active) {
             processStates.put(taskId, ProcessState.ACTIVE);
             System.out.println("PreciseCompletionTracker: " + taskId + " is now active");
+        } else if (currentState == ProcessState.STARTING && hasTaskExceededStartTimeout(taskId)) {
+            failTaskGracefully(taskId, "Mine task never became active", "Mine task could not start. Make sure the target block exists nearby and Baritone isn't busy.");
+            return true;
         } else if (currentState == ProcessState.ACTIVE) {
-            if (!mineProcess.isActive()) {
-                System.out.println("PreciseCompletionTracker: " + taskId + " completed - no longer active");
-                completeTask(taskId);
-                return true;
+            if (!active) {
+                processStates.put(taskId, ProcessState.COMPLETING);
+                taskCompletionGraceStarts.put(taskId, System.currentTimeMillis());
+                System.out.println("PreciseCompletionTracker: " + taskId + " entering completion grace");
+            }
+        } else if (currentState == ProcessState.COMPLETING) {
+            if (active) {
+                processStates.put(taskId, ProcessState.ACTIVE);
+                taskCompletionGraceStarts.remove(taskId);
+                System.out.println("PreciseCompletionTracker: " + taskId + " resumed mining during grace period");
+            } else {
+                Long graceStart = taskCompletionGraceStarts.get(taskId);
+                if (graceStart == null) {
+                    graceStart = System.currentTimeMillis();
+                    taskCompletionGraceStarts.put(taskId, graceStart);
+                }
+                if (System.currentTimeMillis() - graceStart >= COLLECT_COMPLETION_GRACE_MS) {
+                    System.out.println("PreciseCompletionTracker: " + taskId + " completed after grace period");
+                    completeTask(taskId);
+                    return true;
+                }
             }
         }
 
         return false;
+    }
+
+    private boolean hasTaskExceededStartTimeout(String taskId) {
+        Long startTime = taskStartTimes.get(taskId);
+        if (startTime == null) {
+            return false;
+        }
+        return System.currentTimeMillis() - startTime > TASK_START_TIMEOUT_MS;
     }
 
     /**
@@ -287,6 +321,7 @@ public class PreciseCompletionTracker {
         CompletableFuture<Void> future = pendingTasks.remove(taskId);
         processStates.remove(taskId);
         Long startTime = taskStartTimes.remove(taskId);
+        taskCompletionGraceStarts.remove(taskId);
         
         if (future != null && !future.isDone()) {
             long duration = startTime != null ? System.currentTimeMillis() - startTime : 0;
@@ -303,12 +338,47 @@ public class PreciseCompletionTracker {
         CompletableFuture<Void> future = pendingTasks.remove(taskId);
         processStates.remove(taskId);
         taskStartTimes.remove(taskId);
+        taskCompletionGraceStarts.remove(taskId);
 
         if (future != null && !future.isDone()) {
             System.out.println("PreciseCompletionTracker: Completing task " + taskId + " with error: " + reason);
             processStates.put(taskId, ProcessState.FAILED);
             future.completeExceptionally(new RuntimeException(reason));
         }
+    }
+
+    private void failTaskGracefully(String taskId, String logMessage, String userMessage) {
+        CompletableFuture<Void> future = pendingTasks.remove(taskId);
+        processStates.remove(taskId);
+        taskStartTimes.remove(taskId);
+        taskCompletionGraceStarts.remove(taskId);
+
+        System.out.println("PreciseCompletionTracker: " + logMessage);
+        notifyPlayer(userMessage);
+
+        if (future != null && !future.isDone()) {
+            future.complete(null);
+        }
+    }
+
+    private void notifyPlayer(String message) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client == null) {
+            return;
+        }
+        client.execute(() -> {
+            if (client.player != null) {
+                client.player.sendMessage(Text.literal(formatChatMessage(message)), false);
+            }
+        });
+    }
+
+    private String formatChatMessage(String message) {
+        final String prefix = "\u00A74[\u00A7cPathmind\u00A74] \u00A77";
+        if (message == null || message.isEmpty()) {
+            return prefix.trim();
+        }
+        return prefix + message;
     }
 
     /**
@@ -322,6 +392,7 @@ public class PreciseCompletionTracker {
 
         processStates.remove(taskId);
         Long startTime = taskStartTimes.remove(taskId);
+        taskCompletionGraceStarts.remove(taskId);
 
         if (!future.isDone()) {
             long duration = startTime != null ? System.currentTimeMillis() - startTime : 0;
@@ -347,6 +418,7 @@ public class PreciseCompletionTracker {
         pendingTasks.clear();
         processStates.clear();
         taskStartTimes.clear();
+        taskCompletionGraceStarts.clear();
     }
     
     /**
