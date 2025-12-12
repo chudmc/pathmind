@@ -27,13 +27,13 @@ A Minecraft Fabric mod that introduces a visual node editor system for creating 
    - Download the latest Fabric API for your 1.21.x version
    - [Download from Modrinth](https://modrinth.com/mod/fabric-api)
 
-3. **Install Pathmind**
-   - Download the latest Pathmind mod jar
-   - Place it in your `mods` folder
-
-4. **Install Fabric API**
+3. **Install Baritone API**
    - Download the the Baritone API build coorisponding to your version
    - [Download from GitHub](https://github.com/cabaletta/baritone/releases)
+
+4. **Install Pathmind**
+   - Download the latest Pathmind mod jar
+   - Place it in your `mods` folder
 
 5. **Launch and Enjoy!**
    - Start Minecraft with Fabric Loader
