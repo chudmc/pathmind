@@ -14,8 +14,8 @@ A Minecraft Fabric mod that introduces a visual node editor system for creating 
 - **Minecraft**: any 1.21.x release
 - **Fabric Loader**: 0.17.2 or higher
 - **Fabric API**: latest release for your 1.21.x version
+- **Baritone API**: 1.21.x release coorisponding with your version
 - **Java**: 21 or higher
-  - Baritone API 1.15.0 is bundled inside the Pathmind jar—no separate download required.
 
 ### Installation
 
