@@ -1,6 +1,6 @@
 # Pathmind
 
-[![Minecraft](https://img.shields.io/badge/Minecraft-1.21.8-00AA00?style=for-the-badge&logo=minecraft)](https://minecraft.net)
+[![Minecraft](https://img.shields.io/badge/Minecraft-1.21.x-00AA00?style=for-the-badge&logo=minecraft)](https://minecraft.net)
 [![Fabric](https://img.shields.io/badge/Fabric-0.17.2-CC6E3E?style=for-the-badge&logo=modrinth)](https://fabricmc.net)
 [![Java](https://img.shields.io/badge/Java-21+-FF6B6B?style=for-the-badge&logo=openjdk)](https://openjdk.java.net)
 [![License](https://img.shields.io/badge/License-CC%20BY--NC%204.0-blue?style=for-the-badge)](https://creativecommons.org/licenses/by-nc/4.0/)
@@ -11,27 +11,31 @@ A Minecraft Fabric mod that introduces a visual node editor system for creating 
 ## Quick Start
 
 ### Prerequisites
-- **Minecraft**: 1.21.8
+- **Minecraft**: any 1.21.x release
 - **Fabric Loader**: 0.17.2 or higher
-- **Fabric API**: 0.133.4+1.21.8 or higher
+- **Fabric API**: latest release for your 1.21.x version
 - **Java**: 21 or higher
   - Baritone API 1.15.0 is bundled inside the Pathmind jar—no separate download required.
 
 ### Installation
 
 1. **Install Fabric Loader**
-   - Download and install Fabric Loader for Minecraft 1.21.8
+   - Download and install Fabric Loader for Minecraft 1.21.x
    - [Download from FabricMC](https://fabricmc.net/use/installer/)
 
 2. **Install Fabric API**
-   - Download the latest Fabric API for 1.21.8
+   - Download the latest Fabric API for your 1.21.x version
    - [Download from Modrinth](https://modrinth.com/mod/fabric-api)
 
 3. **Install Pathmind**
    - Download the latest Pathmind mod jar
    - Place it in your `mods` folder
 
-4. **Launch and Enjoy!**
+4. **Install Fabric API**
+   - Download the the Baritone API build coorisponding to your version
+   - [Download from GitHub](https://github.com/cabaletta/baritone/releases)
+
+5. **Launch and Enjoy!**
    - Start Minecraft with Fabric Loader
    - Use your configured keybind to open the visual editor
 
@@ -86,10 +90,10 @@ src/main/java/com/pathmind/
 | Component | Version |
 |-----------|---------|
 | **Mod Version** | 1.0.0 |
-| **Minecraft Version** | 1.21.8 |
-| **Yarn Mappings** | 1.21.8+build.1 (with :v2) |
+| **Minecraft Version** | 1.21.x (built & tested on 1.21.8) |
+| **Yarn Mappings** | 1.21.8+build.1 (with :v2 for compilation) |
 | **Fabric Loader** | 0.17.2 |
-| **Fabric API** | 0.133.4+1.21.8 |
+| **Fabric API** | Latest 1.21.x-compatible release |
 | **Baritone API** | 1.15.0 (bundled) |
 
 ### Development Guidelines

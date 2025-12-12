@@ -3,7 +3,7 @@
   "id": "pathmind",
   "version": "${version}",
   "name": "Pathmind",
-  "description": "A visual node-based editor for creating in-game automation workflows, tools, and intelligent behavior sequences.",
+  "description": "Pathmind provides a modular, node-driven system for scripting in-game actions and crafting sequences.",
   "authors": [
     "ryduzz"
   ],
@@ -28,7 +28,7 @@
   ],
   "depends": {
     "fabricloader": ">=0.17.2",
-    "minecraft": "~1.21.8",
+    "minecraft": "~1.21",
     "java": ">=21",
     "fabric-api": "*"
   }

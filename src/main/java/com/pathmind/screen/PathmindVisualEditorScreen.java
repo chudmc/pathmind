@@ -70,7 +70,7 @@ public class PathmindVisualEditorScreen extends Screen {
     private static final int INFO_POPUP_HEIGHT = 180;
     private static final int TITLE_INTERACTION_PADDING = 4;
     private static final String INFO_POPUP_AUTHOR = "ryduzz";
-    private static final String INFO_POPUP_TARGET_VERSION = "1.21.8";
+    private static final String INFO_POPUP_TARGET_VERSION = "1.21.x";
     private static final Text TITLE_TEXT = Text.literal("Pathmind Node Editor");
 
     private NodeGraph nodeGraph;
