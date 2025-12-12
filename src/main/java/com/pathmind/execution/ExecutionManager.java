@@ -52,6 +52,11 @@ public class ExecutionManager {
     private final Set<Node> activeEventFunctionNodes;
     private boolean globalExecutionActive;
     private boolean lastSnapshotWasGlobal;
+    private long activeNodeStartTime;
+    private long activeNodePausedDuration;
+    private long activeNodePauseStartTime;
+    private long activeNodeEndTime;
+    private boolean singleplayerPaused;
 
     private static final long NODE_EXECUTION_DELAY_MS = 150L;
 
@@ -114,6 +119,11 @@ public class ExecutionManager {
         this.activeConnectionLookup = ConcurrentHashMap.newKeySet();
         this.eventConnectionOwners = new ConcurrentHashMap<>();
         this.activeEventFunctionNodes = ConcurrentHashMap.newKeySet();
+        this.activeNodeStartTime = 0;
+        this.activeNodePausedDuration = 0;
+        this.activeNodePauseStartTime = 0;
+        this.activeNodeEndTime = 0;
+        this.singleplayerPaused = false;
     }
     
     public static ExecutionManager getInstance() {
@@ -138,6 +148,9 @@ public class ExecutionManager {
             System.out.println("ExecutionManager: No START nodes found!");
             return;
         }
+
+        // Ensure Baritone isn't still executing stale goals from a previous session
+        cancelAllBaritoneCommands();
 
         List<NodeConnection> filteredConnections = filterConnections(connections);
 
@@ -249,6 +262,11 @@ public class ExecutionManager {
      */
     private void startExecution(List<Node> startNodes, boolean markGlobal) {
         this.activeNode = startNodes.isEmpty() ? null : startNodes.get(0);
+        if (this.activeNode != null) {
+            resetActiveNodeTiming();
+        } else {
+            clearActiveNodeTiming();
+        }
         this.isExecuting = true;
         this.globalExecutionActive = markGlobal;
         this.cancelRequested = false;
@@ -268,6 +286,11 @@ public class ExecutionManager {
      */
     public void setActiveNode(Node node) {
         this.activeNode = node;
+        if (node != null) {
+            resetActiveNodeTiming();
+        } else {
+            clearActiveNodeTiming();
+        }
         System.out.println("ExecutionManager: Set active node to " + (node != null ? node.getType() : "null") + " at time " + System.currentTimeMillis());
     }
     
@@ -282,9 +305,11 @@ public class ExecutionManager {
             this.executionEndTime = 0;
             this.executionStartTime = 0;
             this.activeNode = null;
+            clearActiveNodeTiming();
             cancelRequested = false;
         } else {
             this.executionEndTime = System.currentTimeMillis();
+            this.activeNodeEndTime = this.executionEndTime;
         }
         // Keep activeNode for minimum display duration
     }
@@ -307,6 +332,7 @@ public class ExecutionManager {
         this.isExecuting = false;
         this.globalExecutionActive = false;
         this.activeNode = null;
+        clearActiveNodeTiming();
         this.executionStartTime = 0;
         this.executionEndTime = 0;
         this.activeNodes.clear();
@@ -419,6 +445,7 @@ public class ExecutionManager {
                 // Clear the active node after minimum display duration
                 this.activeNode = null;
                 this.executionEndTime = 0;
+                clearActiveNodeTiming();
             }
         }
         return false;
@@ -450,6 +477,64 @@ public class ExecutionManager {
         }
         
         return 0;
+    }
+
+    /**
+     * Get the elapsed duration for the currently active node in milliseconds.
+     */
+    public long getActiveNodeDuration() {
+        if (activeNodeStartTime == 0) {
+            return 0;
+        }
+
+        long referenceTime;
+        if (isExecuting) {
+            referenceTime = System.currentTimeMillis();
+        } else if (activeNodeEndTime > 0) {
+            referenceTime = activeNodeEndTime;
+        } else {
+            referenceTime = System.currentTimeMillis();
+        }
+
+        long pausedTime = activeNodePausedDuration;
+        if (singleplayerPaused && activeNodePauseStartTime > 0) {
+            pausedTime += referenceTime - activeNodePauseStartTime;
+        }
+
+        return Math.max(0, referenceTime - activeNodeStartTime - pausedTime);
+    }
+
+    /**
+     * Update whether the singleplayer game is currently paused so node timers can be frozen.
+     */
+    public void setSingleplayerPaused(boolean paused) {
+        if (this.singleplayerPaused == paused) {
+            return;
+        }
+
+        this.singleplayerPaused = paused;
+        if (paused) {
+            if (activeNode != null) {
+                this.activeNodePauseStartTime = System.currentTimeMillis();
+            }
+        } else if (activeNodePauseStartTime > 0) {
+            this.activeNodePausedDuration += System.currentTimeMillis() - this.activeNodePauseStartTime;
+            this.activeNodePauseStartTime = 0;
+        }
+    }
+
+    private void resetActiveNodeTiming() {
+        this.activeNodeStartTime = System.currentTimeMillis();
+        this.activeNodePausedDuration = 0;
+        this.activeNodeEndTime = 0;
+        this.activeNodePauseStartTime = singleplayerPaused ? activeNodeStartTime : 0;
+    }
+
+    private void clearActiveNodeTiming() {
+        this.activeNodeStartTime = 0;
+        this.activeNodePausedDuration = 0;
+        this.activeNodePauseStartTime = 0;
+        this.activeNodeEndTime = 0;
     }
 
     private CompletableFuture<Void> runChain(Node currentNode, ChainController controller) {

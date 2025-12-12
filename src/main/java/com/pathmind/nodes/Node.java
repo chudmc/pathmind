@@ -16,6 +16,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
 import baritone.api.BaritoneAPI;
 import baritone.api.IBaritone;
+import baritone.api.behavior.IPathingBehavior;
 import baritone.api.process.ICustomGoalProcess;
 import baritone.api.process.IExploreProcess;
 import baritone.api.process.IGetToBlockProcess;
@@ -2963,6 +2964,9 @@ public class Node {
                     if (!isBlockReplaceable(client.world, mutable)) {
                         continue;
                     }
+                    if (!hasPlacementSupport(client.world, mutable)) {
+                        continue;
+                    }
                     Box blockBox = new Box(mutable.getX(), mutable.getY(), mutable.getZ(), mutable.getX() + 1, mutable.getY() + 1, mutable.getZ() + 1);
                     if (!client.world.getOtherEntities(null, blockBox).isEmpty()) {
                         continue;
@@ -3499,6 +3503,7 @@ public class Node {
                     return;
                 }
                 System.out.println("Executing mine by name for " + amount + "x " + targets);
+                resetBaritonePathingBeforeMine(baritone, mineProcess);
                 PreciseCompletionTracker.getInstance().startTrackingTask(PreciseCompletionTracker.TASK_COLLECT, future);
                 // Dispatch Baritone calls off the render thread so the client never blocks
                 CompletableFuture.runAsync(() -> {
@@ -3514,6 +3519,7 @@ public class Node {
             }
             case COLLECT_MULTIPLE: {
                 System.out.println("Executing mine by name for blocks: " + targets);
+                resetBaritonePathingBeforeMine(baritone, mineProcess);
                 PreciseCompletionTracker.getInstance().startTrackingTask(PreciseCompletionTracker.TASK_COLLECT, future);
                 // Dispatch Baritone calls off the render thread so the client never blocks
                 CompletableFuture.runAsync(() -> {
@@ -3530,6 +3536,50 @@ public class Node {
             default:
                 future.completeExceptionally(new RuntimeException("Unknown COLLECT mode: " + mode));
                 break;
+        }
+    }
+
+    private void resetBaritonePathingBeforeMine(IBaritone baritone, IMineProcess mineProcess) {
+        if (baritone == null) {
+            return;
+        }
+
+        try {
+            if (mineProcess != null) {
+                if (mineProcess.isActive()) {
+                    mineProcess.cancel();
+                }
+                // Ensure any queued mine targets from previous runs are cleared
+                mineProcess.onLostControl();
+            }
+
+            IPathingBehavior pathingBehavior = baritone.getPathingBehavior();
+            if (pathingBehavior != null && (pathingBehavior.isPathing() || pathingBehavior.hasPath())) {
+                pathingBehavior.cancelEverything();
+            }
+
+            ICustomGoalProcess goalProcess = baritone.getCustomGoalProcess();
+            if (goalProcess != null) {
+                goalProcess.setGoal(null);
+                goalProcess.onLostControl();
+            }
+
+            IGetToBlockProcess getToBlockProcess = baritone.getGetToBlockProcess();
+            if (getToBlockProcess != null && getToBlockProcess.isActive()) {
+                getToBlockProcess.onLostControl();
+            }
+
+            IExploreProcess exploreProcess = baritone.getExploreProcess();
+            if (exploreProcess != null && exploreProcess.isActive()) {
+                exploreProcess.onLostControl();
+            }
+
+            IFarmProcess farmProcess = baritone.getFarmProcess();
+            if (farmProcess != null && farmProcess.isActive()) {
+                farmProcess.onLostControl();
+            }
+        } catch (Exception e) {
+            System.err.println("Node: Failed to reset Baritone pathing before mining: " + e.getMessage());
         }
     }
 
@@ -5902,11 +5952,19 @@ public class Node {
         PlayerInventory inventory = client.player.getInventory();
         int slot = findHotbarSlotWithItem(inventory, targetItem);
         if (slot == -1) {
-            boolean elsewhere = inventory.contains(new ItemStack(targetItem));
-            if (elsewhere) {
-                throw new PlacementFailure("Cannot place block \"" + blockId + "\": move it to your hotbar first.");
+            int inventorySlot = findMainInventorySlotWithItem(inventory, targetItem);
+            if (inventorySlot == -1) {
+                boolean elsewhere = inventory.contains(new ItemStack(targetItem));
+                if (elsewhere) {
+                    throw new PlacementFailure("Cannot place block \"" + blockId + "\": the only available items are equipped or otherwise unavailable.");
+                }
+                throw new PlacementFailure("Cannot place block \"" + blockId + "\": none available in your inventory.");
             }
-            throw new PlacementFailure("Cannot place block \"" + blockId + "\": none available in your inventory.");
+
+            slot = moveInventoryStackToHotbar(client, inventory, inventorySlot, targetItem);
+            if (slot == -1) {
+                throw new PlacementFailure("Cannot place block \"" + blockId + "\": failed to move it into your hotbar.");
+            }
         }
 
         if (hand == Hand.MAIN_HAND) {
@@ -5958,6 +6016,61 @@ public class Node {
             }
         }
         return -1;
+    }
+
+    private int findMainInventorySlotWithItem(PlayerInventory inventory, Item targetItem) {
+        if (inventory == null || targetItem == null) {
+            return -1;
+        }
+        int hotbarSize = PlayerInventory.getHotbarSize();
+        for (int slot = hotbarSize; slot < PlayerInventory.MAIN_SIZE; slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (!stack.isEmpty() && stack.isOf(targetItem)) {
+                return slot;
+            }
+        }
+        return -1;
+    }
+
+    private int findEmptyHotbarSlot(PlayerInventory inventory) {
+        if (inventory == null) {
+            return -1;
+        }
+        int hotbarSize = PlayerInventory.getHotbarSize();
+        for (int slot = 0; slot < hotbarSize; slot++) {
+            if (inventory.getStack(slot).isEmpty()) {
+                return slot;
+            }
+        }
+        return -1;
+    }
+
+    private int moveInventoryStackToHotbar(net.minecraft.client.MinecraftClient client, PlayerInventory inventory, int inventorySlot, Item targetItem) {
+        if (client == null || client.player == null || client.interactionManager == null) {
+            return -1;
+        }
+        ScreenHandler handler = client.player.currentScreenHandler;
+        if (handler == null) {
+            return -1;
+        }
+
+        int targetHotbarSlot = findEmptyHotbarSlot(inventory);
+        if (targetHotbarSlot == -1) {
+            targetHotbarSlot = inventory.getSelectedSlot();
+        }
+
+        int handlerSlot = mapPlayerInventorySlot(handler, inventorySlot);
+        if (handlerSlot < 0) {
+            return -1;
+        }
+
+        client.interactionManager.clickSlot(handler.syncId, handlerSlot, targetHotbarSlot, SlotActionType.SWAP, client.player);
+
+        ItemStack hotbarStack = inventory.getStack(targetHotbarSlot);
+        if (hotbarStack.isEmpty() || !hotbarStack.isOf(targetItem)) {
+            return -1;
+        }
+        return targetHotbarSlot;
     }
 
     private BlockHitResult preparePlacementHitResult(net.minecraft.client.MinecraftClient client, BlockPos targetPos, String blockId, Hand hand, double reachSquared) {
@@ -6028,43 +6141,55 @@ public class Node {
                 placementSide.getOffsetY() * 0.5D,
                 placementSide.getOffsetZ() * 0.5D
             );
-            Vec3d rayEnd = faceCenter.subtract(
-                placementSide.getOffsetX() * 0.001D,
-                placementSide.getOffsetY() * 0.001D,
-                placementSide.getOffsetZ() * 0.001D
-            );
 
-            double distance = eyePos.squaredDistanceTo(rayEnd);
-            if (distance > reachSquared) {
-                continue;
-            }
-
-            RaycastContext context = new RaycastContext(
-                eyePos,
-                rayEnd,
-                RaycastContext.ShapeType.COLLIDER,
-                RaycastContext.FluidHandling.NONE,
-                client.player
-            );
-            BlockHitResult raycast = client.world.raycast(context);
-            if (raycast.getType() != HitResult.Type.BLOCK) {
-                continue;
-            }
-            if (!raycast.getBlockPos().equals(supportPos)) {
-                continue;
-            }
-            if (raycast.getSide() != placementSide) {
-                continue;
+            Vec3d faceAxisA;
+            Vec3d faceAxisB;
+            switch (placementSide.getAxis()) {
+                case X -> {
+                    faceAxisA = FACE_AXIS_Y;
+                    faceAxisB = FACE_AXIS_Z;
+                }
+                case Y -> {
+                    faceAxisA = FACE_AXIS_X;
+                    faceAxisB = FACE_AXIS_Z;
+                }
+                default -> {
+                    faceAxisA = FACE_AXIS_X;
+                    faceAxisB = FACE_AXIS_Y;
+                }
             }
 
-            if (distance < bestDistance) {
-                bestDistance = distance;
-                bestResult = new BlockHitResult(faceCenter, placementSide, supportPos, false);
+            Vec3d placementNormal = Vec3d.of(placementSide.getVector());
+
+            for (double offsetA : FACE_OFFSET_SAMPLES) {
+                for (double offsetB : FACE_OFFSET_SAMPLES) {
+                    Vec3d samplePoint = faceCenter
+                        .add(faceAxisA.multiply(offsetA))
+                        .add(faceAxisB.multiply(offsetB));
+                    double distance = eyePos.squaredDistanceTo(samplePoint);
+                    if (distance > reachSquared) {
+                        continue;
+                    }
+
+                    if (distance < bestDistance) {
+                        bestDistance = distance;
+                        bestResult = new BlockHitResult(
+                            samplePoint.subtract(placementNormal.multiply(0.001D)),
+                            placementSide,
+                            supportPos,
+                            false
+                        );
+                    }
+                }
             }
         }
-
         return bestResult;
     }
+
+    private static final double[] FACE_OFFSET_SAMPLES = {0.0D, 0.32D, -0.32D, 0.48D, -0.48D};
+    private static final Vec3d FACE_AXIS_X = new Vec3d(1.0D, 0.0D, 0.0D);
+    private static final Vec3d FACE_AXIS_Y = new Vec3d(0.0D, 1.0D, 0.0D);
+    private static final Vec3d FACE_AXIS_Z = new Vec3d(0.0D, 0.0D, 1.0D);
 
     private boolean canPlaceBlockAt(net.minecraft.client.MinecraftClient client, Hand hand, ItemStack stack, BlockItem blockItem, BlockHitResult hitResult) {
         if (client.player == null || client.world == null) {
@@ -6162,6 +6287,20 @@ public class Node {
         }
 
         return state.getCollisionShape(world, targetPos).isEmpty();
+    }
+
+    private boolean hasPlacementSupport(net.minecraft.world.World world, BlockPos targetPos) {
+        if (world == null || targetPos == null) {
+            return false;
+        }
+        for (Direction direction : Direction.values()) {
+            BlockPos supportPos = targetPos.offset(direction);
+            BlockState supportState = world.getBlockState(supportPos);
+            if (!supportState.isAir() && !supportState.getCollisionShape(world, supportPos).isEmpty()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void executeLookCommand(CompletableFuture<Void> future) {

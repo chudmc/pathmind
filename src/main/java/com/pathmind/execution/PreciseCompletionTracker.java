@@ -30,6 +30,7 @@ public class PreciseCompletionTracker {
     private final Map<String, ProcessState> processStates = new ConcurrentHashMap<>();
     private final Map<String, Long> taskStartTimes = new ConcurrentHashMap<>();
     private final Map<String, Long> taskCompletionGraceStarts = new ConcurrentHashMap<>();
+    private final Map<String, String> taskTypes = new ConcurrentHashMap<>();
     private Timer monitoringTimer;
     
     // Task types
@@ -41,7 +42,9 @@ public class PreciseCompletionTracker {
     public static final String TASK_FARM = "farm";
     
     // Maximum monitoring duration (in milliseconds) - safety fallback
-    private static final long MAX_MONITORING_DURATION = 300000; // 5 minutes
+    // Long-running nodes like Mine can legitimately take several minutes, so we allow a 60-minute window.
+    private static final long MAX_MONITORING_DURATION = 3_600_000; // 60 minutes
+    private static final long WARNING_THRESHOLD_MS = 300_000; // 5 minutes reminder window
     private static final long TASK_START_TIMEOUT_MS = 8000;
     private static final long COLLECT_COMPLETION_GRACE_MS = 750;
     
@@ -67,15 +70,34 @@ public class PreciseCompletionTracker {
     /**
      * Start tracking a task with precise completion detection
      */
-    public void startTrackingTask(String taskId, CompletableFuture<Void> future) {
+    public void startTrackingTask(String taskType, CompletableFuture<Void> future) {
+        String taskId = createTaskId(taskType);
         pendingTasks.put(taskId, future);
         processStates.put(taskId, ProcessState.STARTING);
         taskStartTimes.put(taskId, System.currentTimeMillis());
+        taskTypes.put(taskId, taskType);
 
-        System.out.println("PreciseCompletionTracker: Started tracking task: " + taskId);
+        System.out.println("PreciseCompletionTracker: Started tracking task: " + taskType + " (" + taskId + ")");
 
-        // Start monitoring this specific task
+        // Start monitoring/tracking this specific task
         startMonitoringTask(taskId);
+        startWarningTimer(taskId);
+    }
+
+    private String createTaskId(String taskType) {
+        return taskType + ":" + java.util.UUID.randomUUID();
+    }
+
+    private String getTaskType(String taskId) {
+        String storedType = taskTypes.get(taskId);
+        if (storedType != null) {
+            return storedType;
+        }
+        int separator = taskId.indexOf(':');
+        if (separator > 0) {
+            return taskId.substring(0, separator);
+        }
+        return taskId;
     }
 
     /**
@@ -105,7 +127,28 @@ public class PreciseCompletionTracker {
         
         monitoringTimer.schedule(monitoringTask, 100, 100); // Start in 100ms, repeat every 100ms
     }
-    
+
+    private void startWarningTimer(String taskId) {
+        if (WARNING_THRESHOLD_MS <= 0L) {
+            return;
+        }
+        TimerTask warningTask = new TimerTask() {
+            @Override
+            public void run() {
+                if (!pendingTasks.containsKey(taskId)) {
+                    this.cancel();
+                    return;
+                }
+                String taskType = getTaskType(taskId);
+                String warning = "Long-running Pathmind task '" + taskType + "' has been running for over 5 minutes. Hold tight until it finishes.";
+                System.out.println("PreciseCompletionTracker: " + warning);
+                notifyPlayer(warning);
+                this.cancel();
+            }
+        };
+        monitoringTimer.schedule(warningTask, WARNING_THRESHOLD_MS);
+    }
+
     /**
      * Check if a specific task has completed
      */
@@ -115,6 +158,7 @@ public class PreciseCompletionTracker {
             completeTaskWithError(taskId, "Baritone not available");
             return true;
         }
+        String taskType = getTaskType(taskId);
         
         // Check for timeout
         Long startTime = taskStartTimes.get(taskId);
@@ -131,7 +175,7 @@ public class PreciseCompletionTracker {
         boolean completed = false;
         ProcessState newState = currentState;
         
-        switch (taskId) {
+        switch (taskType) {
             case TASK_GOTO:
             case TASK_PATH:
                 completed = checkPathingCompletion(baritone, taskId);
@@ -154,7 +198,7 @@ public class PreciseCompletionTracker {
                 break;
                 
             default:
-                System.err.println("Unknown task type: " + taskId);
+                System.err.println("Unknown task type: " + taskType + " (" + taskId + ")");
                 completed = true;
                 break;
         }
@@ -226,22 +270,31 @@ public class PreciseCompletionTracker {
         }
 
         ProcessState currentState = processStates.get(taskId);
-        boolean active = mineProcess.isActive();
+        IPathingBehavior pathingBehavior = baritone.getPathingBehavior();
+        ICustomGoalProcess customGoalProcess = baritone.getCustomGoalProcess();
+        IGetToBlockProcess getToBlockProcess = baritone.getGetToBlockProcess();
 
-        if (currentState == ProcessState.STARTING && active) {
+        boolean miningActive = mineProcess.isActive();
+        boolean pathingActive =
+                (pathingBehavior != null && (pathingBehavior.isPathing() || pathingBehavior.hasPath()))
+                || (customGoalProcess != null && customGoalProcess.isActive())
+                || (getToBlockProcess != null && getToBlockProcess.isActive());
+        boolean anyActive = miningActive || pathingActive;
+
+        if (currentState == ProcessState.STARTING && anyActive) {
             processStates.put(taskId, ProcessState.ACTIVE);
             System.out.println("PreciseCompletionTracker: " + taskId + " is now active");
         } else if (currentState == ProcessState.STARTING && hasTaskExceededStartTimeout(taskId)) {
             failTaskGracefully(taskId, "Mine task never became active", "Mine task could not start. Make sure the target block exists nearby and Baritone isn't busy.");
             return true;
         } else if (currentState == ProcessState.ACTIVE) {
-            if (!active) {
+            if (!anyActive) {
                 processStates.put(taskId, ProcessState.COMPLETING);
                 taskCompletionGraceStarts.put(taskId, System.currentTimeMillis());
                 System.out.println("PreciseCompletionTracker: " + taskId + " entering completion grace");
             }
         } else if (currentState == ProcessState.COMPLETING) {
-            if (active) {
+            if (anyActive) {
                 processStates.put(taskId, ProcessState.ACTIVE);
                 taskCompletionGraceStarts.remove(taskId);
                 System.out.println("PreciseCompletionTracker: " + taskId + " resumed mining during grace period");
@@ -322,6 +375,7 @@ public class PreciseCompletionTracker {
         processStates.remove(taskId);
         Long startTime = taskStartTimes.remove(taskId);
         taskCompletionGraceStarts.remove(taskId);
+        taskTypes.remove(taskId);
         
         if (future != null && !future.isDone()) {
             long duration = startTime != null ? System.currentTimeMillis() - startTime : 0;
@@ -339,6 +393,7 @@ public class PreciseCompletionTracker {
         processStates.remove(taskId);
         taskStartTimes.remove(taskId);
         taskCompletionGraceStarts.remove(taskId);
+        taskTypes.remove(taskId);
 
         if (future != null && !future.isDone()) {
             System.out.println("PreciseCompletionTracker: Completing task " + taskId + " with error: " + reason);
@@ -352,6 +407,7 @@ public class PreciseCompletionTracker {
         processStates.remove(taskId);
         taskStartTimes.remove(taskId);
         taskCompletionGraceStarts.remove(taskId);
+        taskTypes.remove(taskId);
 
         System.out.println("PreciseCompletionTracker: " + logMessage);
         notifyPlayer(userMessage);
@@ -385,21 +441,41 @@ public class PreciseCompletionTracker {
      * Mark a task as completed from an external event (e.g. amount monitors).
      */
     public void markTaskCompleted(String taskId) {
-        CompletableFuture<Void> future = pendingTasks.remove(taskId);
+        String resolvedTaskId = resolveTaskId(taskId);
+        if (resolvedTaskId == null) {
+            return;
+        }
+
+        CompletableFuture<Void> future = pendingTasks.remove(resolvedTaskId);
         if (future == null) {
             return;
         }
 
-        processStates.remove(taskId);
-        Long startTime = taskStartTimes.remove(taskId);
-        taskCompletionGraceStarts.remove(taskId);
+        processStates.remove(resolvedTaskId);
+        Long startTime = taskStartTimes.remove(resolvedTaskId);
+        taskCompletionGraceStarts.remove(resolvedTaskId);
+        taskTypes.remove(resolvedTaskId);
 
         if (!future.isDone()) {
             long duration = startTime != null ? System.currentTimeMillis() - startTime : 0;
-            System.out.println("PreciseCompletionTracker: Completing task " + taskId + " from external signal (duration: " + duration + "ms)");
-            processStates.put(taskId, ProcessState.COMPLETED);
+            System.out.println("PreciseCompletionTracker: Completing task " + resolvedTaskId + " from external signal (duration: " + duration + "ms)");
             future.complete(null);
         }
+    }
+
+    private String resolveTaskId(String taskIdOrType) {
+        if (taskIdOrType == null) {
+            return null;
+        }
+        if (pendingTasks.containsKey(taskIdOrType)) {
+            return taskIdOrType;
+        }
+        for (Map.Entry<String, String> entry : taskTypes.entrySet()) {
+            if (entry.getValue().equals(taskIdOrType)) {
+                return entry.getKey();
+            }
+        }
+        return null;
     }
 
     /**
@@ -419,6 +495,7 @@ public class PreciseCompletionTracker {
         processStates.clear();
         taskStartTimes.clear();
         taskCompletionGraceStarts.clear();
+        taskTypes.clear();
     }
     
     /**

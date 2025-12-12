@@ -8,9 +8,9 @@
     "YourName"
   ],
   "contact": {
-    "homepage": "https://github.com/yourusername/pathmind",
-    "sources": "https://github.com/yourusername/pathmind",
-    "issues": "https://github.com/yourusername/pathmind/issues"
+    "homepage": "https://github.com/soymods/pathmind",
+    "sources": "https://github.com/soymods/pathmind",
+    "issues": "https://github.com/soymods/pathmind/issues"
   },
   "license": "CC BY-NC 4.0",
   "icon": "assets/pathmind/logo.png",

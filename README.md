@@ -4,7 +4,7 @@
 [![Fabric](https://img.shields.io/badge/Fabric-0.17.2-CC6E3E?style=for-the-badge&logo=modrinth)](https://fabricmc.net)
 [![Java](https://img.shields.io/badge/Java-21+-FF6B6B?style=for-the-badge&logo=openjdk)](https://openjdk.java.net)
 [![License](https://img.shields.io/badge/License-CC%20BY--NC%204.0-blue?style=for-the-badge)](https://creativecommons.org/licenses/by-nc/4.0/)
-[![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen?style=for-the-badge)](https://github.com/hotlinemc/pathmind)
+[![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen?style=for-the-badge)](https://github.com/soymods/pathmind)
 
 A Minecraft Fabric mod that introduces a visual node editor system for creating complex workflows and automation sequences through an intuitive graphical interface.
 
@@ -41,7 +41,7 @@ A Minecraft Fabric mod that introduces a visual node editor system for creating 
 
 1. **Clone the Repository**
    ```bash
-   git clone https://github.com/hotlinemc/pathmind.git
+   git clone https://github.com/soymods/pathmind.git
    cd pathmind
    ```
 
@@ -116,8 +116,8 @@ file. In summary:
 
 Found a bug or have an idea? We'd love to hear from you!
 
-- **Bug Reports**: [Open an Issue](https://github.com/hotlinemc/pathmind/issues/new?template=bug_report.md)
-- **Feature Requests**: [Open an Issue](https://github.com/hotlinemc/pathmind/issues/new?template=feature_request.md)
+- **Bug Reports**: [Open an Issue](https://github.com/soymods/pathmind/issues/new?template=bug_report.md)
+- **Feature Requests**: [Open an Issue](https://github.com/soymods/pathmind/issues/new?template=feature_request.md)
 - **General Discussion**: [Join our Discord](https://discord.gg/zWT2zxQm)
 
 ## Acknowledgments
@@ -131,14 +131,14 @@ Found a bug or have an idea? We'd love to hear from you!
 Need help? Here are some resources:
 
 - **Documentation**: Check this README and in-game tooltips
-- **Issues**: [GitHub Issues](https://github.com/hotlinemc/pathmind/issues)
+- **Issues**: [GitHub Issues](https://github.com/soymods/pathmind/issues)
 - **Discord**: [Join our Community](https://discord.gg/zWT2zxQm)
 
 ---
 
 <div align="center">
 
-[![GitHub](https://img.shields.io/badge/GitHub-Repository-black?style=for-the-badge&logo=github)](https://github.com/hotlinemc/pathmind)
+[![GitHub](https://img.shields.io/badge/GitHub-Repository-black?style=for-the-badge&logo=github)](https://github.com/soymods/pathmind)
 [![Modrinth](https://img.shields.io/badge/Modrinth-Download-00D5AA?style=for-the-badge&logo=modrinth)](https://modrinth.com/mod/pathmind)
 
 </div>

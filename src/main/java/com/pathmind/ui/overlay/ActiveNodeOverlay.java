@@ -86,8 +86,8 @@ public class ActiveNodeOverlay {
         );
         
         // Render execution time (right-aligned)
-        long executionDuration = executionManager.getExecutionDuration();
-        String timeText = "Time: " + formatDuration(executionDuration);
+        long executionDuration = executionManager.getActiveNodeDuration();
+        String timeText = "Node Time: " + formatDuration(executionDuration);
         int timeWidth = textRenderer.getWidth(timeText);
         context.drawTextWithShadow(
             textRenderer,

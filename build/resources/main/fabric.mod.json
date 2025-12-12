@@ -3,17 +3,17 @@
   "id": "pathmind",
   "version": "1.0.0",
   "name": "Pathmind",
-  "description": "A Minecraft Fabric mod that enhances gameplay with intelligent features.",
+  "description": "A visual node-based editor for creating in-game automation workflows and intelligent tools.",
   "authors": [
-    "YourName"
+    "ryduzz"
   ],
   "contact": {
-    "homepage": "https://github.com/yourusername/pathmind",
-    "sources": "https://github.com/yourusername/pathmind",
-    "issues": "https://github.com/yourusername/pathmind/issues"
+    "homepage": "https://modrinth.com/mod/pathmind",
+    "sources": "https://github.com/ChudMC/pathmind",
+    "issues": "https://github.com/ChudMC/pathmind/issues"
   },
-  "license": "CC BY-NC 4.0",
-  "icon": "assets/pathmind/logo.png",
+  "license": "Pathmind License (All Rights Reserved)",
+  "icon": "icon.png",
   "environment": "*",
   "entrypoints": {
     "main": [
